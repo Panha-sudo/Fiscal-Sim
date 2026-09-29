@@ -103,7 +103,7 @@ def _fmt(x, d=2):
     return "" if pd.isna(x) else f"{x:.{d}f}"
 
 
-def markdown(ctx, results, table, shap_out, out: Path, runs: int) -> str:
+def markdown(ctx, results, table, shap_out, out: Path, runs: int, opt: dict | None = None) -> str:
     ev = ctx.m1["evaluation"]
     bt2 = ctx.m2_backtest["table"]
     bt5 = ctx.m5_backtest
@@ -215,6 +215,10 @@ def markdown(ctx, results, table, shap_out, out: Path, runs: int) -> str:
         "",
         shap_out["uncertainty"].rename("mean |SHAP|, pp of GDP").round(3).to_frame().to_markdown(),
         "",
+    ]
+    if opt:
+        lines += optimiser_markdown(opt)
+    lines += [
         "## Caveats",
         "",
         "- Synthetic data: every level is illustrative; relative scenario differences are the useful part.",
@@ -228,3 +232,32 @@ def markdown(ctx, results, table, shap_out, out: Path, runs: int) -> str:
     text = "\n".join(lines) + "\n"
     (out / "report.md").write_text(text)
     return text
+
+
+def optimiser_markdown(opt: dict) -> list[str]:
+    cols = ["retirement_age", "pension_formula", "accrual_rate", "contribution_rise_per_side", "salary_rule",
+            "restrain_non_priority", "cost", "adequacy", "prob_fund_depleted"]
+    lines = ["## AI reform optimiser", "",
+             "Surrogate-assisted search (Gaussian-process surrogates, optimistic Pareto infill) over reform",
+             "packages. Cost = average total cost 2027-2076, % of GDP (median path); adequacy = average",
+             "replacement rate of new retirees 2047-2076. Scored on the first 200 Monte Carlo paths.", ""]
+    for key, title in (("pension", "Pension levers only (pay rule held at the status quo)"),
+                       ("pension_pay", "Pension, pay and hiring levers")):
+        r = opt[key]
+        s0 = r["scenarios"].loc["S0"]
+        lines += [f"### {title}", "",
+                  f"{r['evaluations']} simulator runs out of {r['grid_size']} possible packages. Surrogate "
+                  f"cross-validated R²: cost {r['surrogate_r2']['cost']:.3f}, adequacy {r['surrogate_r2']['adequacy']:.3f}."]
+        if "grid_check" in r:
+            g = r["grid_check"]
+            lines.append(f"Against brute force: {g['hypervolume_ratio']:.1%} of the true front's hypervolume, "
+                         f"{g['true_front_found']} of {g['true_front_size']} front packages found exactly.")
+        keep = r["front"][r["front"].adequacy >= s0["adequacy"] - 0.005]
+        if len(keep):
+            b = keep.sort_values("cost").iloc[0]
+            lines.append(f"Cheapest package keeping status-quo adequacy ({s0['adequacy']:.0%}): cost "
+                         f"{b['cost']:.2f}% vs {s0['cost']:.2f}% of GDP, retirement age {int(b['retirement_age'])}, "
+                         f"{b['pension_formula']} formula, contributions +{b['contribution_rise_per_side'] * 100:.0f} pp per side, "
+                         f"pay rule {b['salary_rule']}.")
+        lines += ["", r["front"][cols].round(4).to_markdown(index=False), ""]
+    return lines

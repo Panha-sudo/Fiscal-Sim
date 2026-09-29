@@ -38,6 +38,7 @@ Uploaded files stay in the viewer's app session and are never written to disk or
 |---|---|
 | Compare scenarios | Fan charts with 90% bands for S0 to S6 and any saved custom scenarios, plus the comparison table at 2036, 2046 or 2076 |
 | Build a scenario | Set every policy lever, see the result live against S0, and save up to three custom scenarios to compare and export |
+| AI reform optimiser | Searches retirement age, pension formula, accrual rate and contribution rises (optionally pay policy and hiring) for the best trade-offs between fiscal cost and pension adequacy, recommends the cheapest package meeting a replacement-rate target, and saves it as a custom scenario |
 | Adequacy and workforce | Replacement rates, the share of retirees on the minimum pension, and headcount |
 | Ministries and provinces | Base-year headcount, age, wage bill and M1 flags by ministry or province, with the projected wage bill under any scenario |
 | What drives results | SHAP charts for policy levers, economic uncertainty and the exit model |
@@ -60,6 +61,7 @@ Ministry and province projections give each unit its base-year share of its sect
 | M4 Pension and fiscal | `m4_pension.py` | A cohort actuarial model covering benefits, CPI or pay indexation, mortality, contributions, the fund balance, depletion and government top-up, across 10,000 paths | Deterministic central path (run 0) |
 | M5 Macro forecast | `m5_macro.py` | Naive, 8-year mean, linear trend, ARIMA, Prophet and LSTM models are backtested on 2018-2025. The best one feeds the central path, which then converges to long-run anchors, and AR(1) shocks generate the Monte Carlo paths | Naive and linear trend |
 | M6 Dashboard and SHAP | `m6_explain.py`, `app.py` | SHAP for the exit model, for Monte Carlo uncertainty drivers and for policy levers against uncertainty. The Streamlit dashboard compares scenarios and builds custom ones live | Static tables (`report.md`) |
+| Reform optimiser | `optimize.py` | Surrogate-assisted multi-objective search: Gaussian-process surrogates of the simulator pick which reform packages to score next, and the Pareto front of cost against adequacy comes from simulator runs only. `python -m fiscalsim.run --grid-check` scores every package to check the search against brute force | Scoring every package in the grid |
 | Policy scenarios | `config.py` | Levers for S0 to S6 as in proposal Table 5 | |
 
 `simulate.py` wires M2 to M4 together. All scenarios share the same random paths, so differences between

@@ -15,6 +15,7 @@ import pandas as pd
 from . import config as C
 from . import m6_explain as m6
 from . import breakdown, report
+from . import optimize as O
 from . import simulate as S
 
 
@@ -55,6 +56,8 @@ def main(argv=None):
     ap.add_argument("--data", type=Path, default=Path("data"))
     ap.add_argument("--out", type=Path, default=Path("outputs"))
     ap.add_argument("--regenerate", action="store_true", help="rebuild synthetic data")
+    ap.add_argument("--grid-check", action="store_true",
+                    help="also score every reform package to check the optimiser against brute force (slow)")
     args = ap.parse_args(argv)
     t0 = time.time()
     log = lambda m: print(f"[{time.time() - t0:6.1f}s] {m}", flush=True)
@@ -74,7 +77,20 @@ def main(argv=None):
     shap_out = {"exit": imp_exit, "uncertainty": imp_unc, "uncertainty_r2": r2_unc,
                 "policy": imp_pol, "policy_r2": r2_pol, "breakeven_accrual": be}
 
+    log("AI reform optimiser (pension levers, then pension + pay levers)")
+    sub = O.paths_subset(ctx, 200)
+    opt = {"pension": O.search(sub, pay_levers=False), "pension_pay": O.search(sub, pay_levers=True)}
+    if args.grid_check:
+        for k, r in opt.items():
+            log(f"Brute-force grid check: {k} ({r['grid_size']} packages)")
+            allrows = O.full_grid(sub, r["pay_levers"])
+            allrows.to_csv(out / f"optimiser_grid_{k}.csv", index=False)
+            r["grid_check"] = O.compare_to_grid(r["front"], allrows)
+
     log("Writing outputs")
+    for k, r in opt.items():
+        r["front"].to_csv(out / f"optimiser_front_{k}.csv", index=False)
+        r["scored"].to_csv(out / f"optimiser_scored_{k}.csv", index=False)
     ctx.m1["evaluation"].to_csv(out / "m1_evaluation.csv")
     ctx.m1["recall_by_type"].to_csv(out / "m1_recall_by_type.csv")
     flagged = ctx.m1["records"]
@@ -102,7 +118,7 @@ def main(argv=None):
     report.chart_fans(results, "total_cost_gdp", charts / "total_cost_gdp_fans.png")
     report.chart_bar(imp_exit.head(10), "M2 exit model: mean |SHAP| (log-odds)", charts / "shap_exit_model.png")
     report.chart_bar(imp_pol, "Total cost 2046: mean |SHAP| (pp of GDP)", charts / "shap_policy.png")
-    report.markdown(ctx, results, table, shap_out, out, args.runs)
+    report.markdown(ctx, results, table, shap_out, out, args.runs, opt)
 
     with open(out / "dashboard_bundle.pkl", "wb") as f:
         pickle.dump({"table": table, "fans": fans, "workforce": wf, "adequacy": ad, "shap": shap_out,
@@ -111,7 +127,7 @@ def main(argv=None):
                      "m1": ctx.m1["evaluation"], "m1_types": ctx.m1["recall_by_type"],
                      "m2": ctx.m2_backtest["table"], "km": ctx.km, "m5": ctx.m5_backtest,
                      "m5_choice": ctx.m5_choice, "macro": ctx.data["macro"], "central": ctx.central,
-                     "engine": engine_bundle(ctx), "runs": args.runs}, f)
+                     "engine": engine_bundle(ctx), "runs": args.runs, "optimiser": opt}, f)
     log(f"Done. Report: {out / 'report.md'}")
 
 

@@ -18,6 +18,7 @@ import streamlit as st
 from fiscalsim import breakdown, export, upload
 from fiscalsim import config as C
 from fiscalsim import m1_data_quality as m1
+from fiscalsim import optimize as O
 from fiscalsim import simulate as S
 from fiscalsim.i18n import LANGS, check_label, metric_label, scenario_name, t
 from fiscalsim.report import LABELS, PALETTE
@@ -151,7 +152,7 @@ if D["source"] == "synthetic":
 else:
     st.caption(t("caption_uploaded", lang, n=D["n_records"], flagged=D["n_flagged"], runs=D["runs"]))
 
-tabs = st.tabs([t(k, lang) for k in ("tab_compare", "tab_build", "tab_adequacy", "tab_units", "tab_drivers",
+tabs = st.tabs([t(k, lang) for k in ("tab_compare", "tab_build", "tab_opt", "tab_adequacy", "tab_units", "tab_drivers",
                                      "tab_checks", "tab_data", "tab_export")])
 
 # ---------- compare ----------
@@ -221,8 +222,112 @@ with tabs[1]:
         st.success(t("saved", lang))
         st.rerun()
 
-# ---------- adequacy and workforce ----------
+# ---------- AI reform optimiser ----------
+def describe(row, lang):
+    a = int(row["retirement_age"])
+    parts = [t("desc_age_phase" if a > 55 else "desc_age", lang, a=a),
+             t("desc_formula_current", lang) if row["pension_formula"] == "current"
+             else t("desc_formula_accrual", lang, r=row["accrual_rate"]),
+             t("desc_contrib", lang, c=row["contribution_rise_per_side"] * 100) if row["contribution_rise_per_side"]
+             else t("desc_contrib_none", lang),
+             t(f"rule_{row['salary_rule']}", lang)]
+    if row["restrain_non_priority"]:
+        parts.append(t("desc_restrain", lang))
+    return "; ".join(parts)
+
+
 with tabs[2]:
+    st.write(t("opt_intro", lang))
+    pay = st.toggle(t("opt_pay", lang), value=False)
+    if pay:
+        st.caption(t("opt_pay_note", lang))
+    okey = (D["source"], "pension_pay" if pay else "pension")
+    store = ss.setdefault("opt", {})
+    if okey not in store and D["source"] == "synthetic" and "optimiser" in B:
+        store[okey] = B["optimiser"][okey[1]]
+    if okey not in store:
+        st.info(t("opt_not_run", lang))
+        if st.button(t("opt_run", lang), type="primary"):
+            bar = st.progress(0.0, text=t("opt_running", lang))
+            store[okey] = O.search(O.paths_subset(D["ctx"], 200), pay_levers=pay,
+                                   progress=lambda f: bar.progress(min(f, 1.0), text=t("opt_running", lang)))
+            st.rerun()
+    else:
+        r = store[okey]
+        front, scored, refs = r["front"], r["scored"], r["scenarios"]
+        m1_, m2_, m3_ = st.columns(3)
+        m1_.metric(t("opt_runs", lang), f"{r['evaluations']:,}", t("opt_runs_of", lang, n=r["grid_size"]),
+                   delta_color="off")
+        m2_.metric(t("opt_r2_cost", lang), f"{r['surrogate_r2']['cost']:.3f}")
+        m3_.metric(t("opt_r2_adequacy", lang), f"{r['surrogate_r2']['adequacy']:.3f}")
+        if "grid_check" in r:
+            st.caption(t("opt_grid", lang, hv=r["grid_check"]["hypervolume_ratio"]))
+        lo, hi = float(front.adequacy.min()), float(front.adequacy.max())
+        target = st.slider(t("opt_target", lang), round(lo * 100), int(hi * 100),
+                           min(int(hi * 100), round(refs.loc["S0", "adequacy"] * 100) - 1), 1, format="%d%%") / 100
+        pick = O.best_for_target(front, min_adequacy=target)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=scored.cost, y=scored.adequacy * 100, mode="markers", name=t("opt_scored", lang),
+                                 marker=dict(color="#b4b2a9", size=6),
+                                 hovertemplate="%{x:.2f}% GDP, %{y:.1f}%<extra></extra>"))
+        fig.add_trace(go.Scatter(x=front.cost, y=front.adequacy * 100, mode="lines+markers", name=t("opt_front", lang),
+                                 line=dict(color=PALETTE[0], width=2), marker=dict(size=8),
+                                 text=[describe(row, lang) for _, row in front.iterrows()],
+                                 hovertemplate="%{text}<br>%{x:.2f}% GDP, %{y:.1f}%<extra></extra>"))
+        # compare like with like: without pay levers, show only the scenarios that change pension rules alone
+        for k, row in (refs if pay else refs.loc[["S0", "S3", "S4"]]).iterrows():
+            fig.add_trace(go.Scatter(x=[row.cost], y=[row.adequacy * 100], mode="markers+text", text=[k],
+                                     textposition="top center", name=label(k), showlegend=False,
+                                     marker=dict(color=color(k), size=11, symbol="diamond"),
+                                     hovertemplate=f"{label(k)}<br>%{{x:.2f}}% GDP, %{{y:.1f}}%<extra></extra>"))
+        if pick is not None:
+            fig.add_trace(go.Scatter(x=[pick.cost], y=[pick.adequacy * 100], mode="markers", name=t("opt_picked", lang),
+                                     marker=dict(color=CUSTOM_COLOR, size=18, symbol="star",
+                                                 line=dict(color="white", width=1))))
+        fig.add_hline(y=target * 100, line=dict(color="#888", dash="dot", width=1))
+        fig.update_layout(height=460, xaxis_title=t("opt_cost", lang), yaxis_title=t("opt_adequacy", lang),
+                          margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig, width="stretch")
+
+        if pick is None:
+            st.warning(t("opt_none", lang))
+        else:
+            s0 = refs.loc["S0"]
+            st.subheader(t("opt_pick", lang))
+            st.success(describe(pick, lang))
+            k1, k2, k3 = st.columns(3)
+            k1.metric(t("opt_cost", lang), f"{pick.cost:.2f}", f"{pick.cost - s0.cost:+.2f} {t('vs_s0', lang)}",
+                      delta_color="inverse")
+            k2.metric(t("opt_adequacy", lang), f"{pick.adequacy:.0%}",
+                      f"{round((pick.adequacy - s0.adequacy) * 100, 1) + 0.0:+.1f} pp {t('vs_s0', lang)}")
+            k3.metric(t("opt_depleted", lang), f"{pick.prob_fund_depleted:.0%}")
+            if st.button(t("opt_save", lang)):
+                name = f"AI pick {len(ss['custom']) + 1}"
+                sc = O.package_from_row(pick).scenario(code=name)
+                ss["custom"][name] = (sc, S.run_scenario(D["ctx"], sc))
+                while len(ss["custom"]) > MAX_CUSTOM:
+                    ss["custom"].pop(next(iter(ss["custom"])))
+                st.success(t("opt_saved", lang, name=name))
+                st.rerun()
+
+        st.subheader(t("opt_table", lang))
+        show = front.assign(
+            **{t("col_ret", lang): front.retirement_age,
+               t("col_formula", lang): [t(f"formula_{f}", lang) + (f" {a:.2%}" if f == "accrual" else "")
+                                        for f, a in zip(front.pension_formula, front.accrual_rate)],
+               t("col_contrib", lang): (front.contribution_rise_per_side * 100).map("+{:.0f} pp".format),
+               t("col_pay", lang): [t(f"rule_{x}", lang) for x in front.salary_rule],
+               t("col_restrain", lang): front.restrain_non_priority,
+               t("opt_cost", lang): front.cost.round(2),
+               t("opt_adequacy", lang): (front.adequacy * 100).round(1),
+               t("opt_depleted", lang): (front.prob_fund_depleted * 100).round(0)})
+        cols = [t(k, lang) for k in ("col_ret", "col_formula", "col_contrib", "col_pay", "col_restrain",
+                                     "opt_cost", "opt_adequacy", "opt_depleted")]
+        st.dataframe(show[cols if pay else cols[:3] + cols[5:]], width="stretch", hide_index=True)
+
+# ---------- adequacy and workforce ----------
+with tabs[3]:
     ad = F["adequacy"].reset_index()
     st.subheader(t("adequacy_title", lang))
     st.plotly_chart(line_figure(ad, "avg_replacement", chosen, t("rr_axis", lang), 100), width="stretch")
@@ -233,7 +338,7 @@ with tabs[2]:
     st.plotly_chart(line_figure(wf, "total", chosen, t("headcount_axis", lang)), width="stretch")
 
 # ---------- ministries and provinces ----------
-with tabs[3]:
+with tabs[4]:
     st.caption(t("units_intro", lang))
     c1, c2 = st.columns(2)
     level = c1.radio(t("units_level", lang), ["ministry", "province"], format_func=lambda x: t(x, lang), horizontal=True)
@@ -272,7 +377,7 @@ with tabs[3]:
                                                 margin=dict(l=10, r=10, t=40, b=10)), width="stretch")
 
 # ---------- drivers ----------
-with tabs[4]:
+with tabs[5]:
     sh = B["shap"]
     c1, c2 = st.columns(2)
     c1.subheader(t("drivers_policy", lang))
@@ -283,7 +388,7 @@ with tabs[4]:
     st.plotly_chart(hbar(sh["exit"].head(10), t("shap_axis_logodds", lang)), width="stretch")
 
 # ---------- checks ----------
-with tabs[5]:
+with tabs[6]:
     st.subheader(t("checks_m1", lang))
     st.info(t("m1_note", lang))
     if D["source"] == "synthetic":
@@ -306,7 +411,7 @@ with tabs[5]:
     st.caption(f"{t('checks_chosen', lang)}: {B['m5_choice']}")
 
 # ---------- your data ----------
-with tabs[6]:
+with tabs[7]:
     st.write(t("data_intro", lang))
     st.download_button(t("data_template", lang), upload.template_csv(B.get("hrmis_sample")),
                        file_name="hrmis_template.csv", mime="text/csv")
@@ -357,7 +462,7 @@ with tabs[6]:
             st.rerun()
 
 # ---------- export ----------
-with tabs[7]:
+with tabs[8]:
     st.write(t("export_intro", lang))
     base = D["base"]
     scen = dict(C.SCENARIOS) | {k: sc for k, (sc, _) in ss["custom"].items()}
@@ -366,6 +471,9 @@ with tabs[7]:
     extra = {}
     if D["m1"] is not None:
         extra["M1 records to verify"] = D["m1"]["records"][D["m1"]["records"]["flag"]].drop(columns=["bank_account"], errors="ignore")
+    for (src, k), r in ss.get("opt", {}).items():
+        if src == D["source"]:
+            extra[f"AI optimiser {k}"] = r["front"]
     xlsx = export.workbook(F, scen, D["runs"], source, breakdown.by(base, "ministry"), breakdown.by(base, "province"), extra)
     st.download_button(t("export_xlsx", lang), xlsx, file_name="fiscal_simulation_results.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")

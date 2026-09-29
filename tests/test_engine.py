@@ -102,3 +102,22 @@ def test_khmer_labels_cover_english():
     from fiscalsim import i18n
     assert set(i18n.EN) == set(i18n.KM)
     assert set(i18n.SCENARIO_NAMES["km"]) == set(C.SCENARIOS)
+
+
+def test_pareto_mask_and_hypervolume():
+    from fiscalsim import optimize as O
+    cost, adequacy = np.array([1.0, 2.0, 1.5, 2.5]), np.array([0.4, 0.6, 0.4, 0.5])
+    assert O.pareto_mask(cost, adequacy).tolist() == [True, True, False, False]
+    assert O.hypervolume(cost, adequacy, 3.0, 0.3) == pytest.approx(1.0 * 0.1 + 1.0 * 0.3)
+
+
+def test_optimiser_finds_front_packages(small):
+    from fiscalsim import optimize as O
+    r = O.search(small["ctx"], n_initial=16, rounds=2, per_round=6)
+    front, s0 = r["front"], r["scenarios"].loc["S0"]
+    assert r["evaluations"] <= 16 + 2 * 6 < r["grid_size"]
+    assert front.on_front.all() and len(front) >= 2
+    assert (front.cost.to_numpy() <= s0.cost + 1e-9).any()  # something at least as cheap as the status quo
+    pick = O.best_for_target(front, min_adequacy=front.adequacy.median())
+    sc = O.package_from_row(pick).scenario(code="AI pick")
+    assert O.objectives(small["ctx"], sc)["cost"] == pytest.approx(pick.cost)
