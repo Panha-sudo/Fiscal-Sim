@@ -121,3 +121,25 @@ def test_optimiser_finds_front_packages(small):
     pick = O.best_for_target(front, min_adequacy=front.adequacy.median())
     sc = O.package_from_row(pick).scenario(code="AI pick")
     assert O.objectives(small["ctx"], sc)["cost"] == pytest.approx(pick.cost)
+
+
+def test_app_runs_and_recovers_from_stale_modules():
+    """The dashboard script runs end to end, including on a server still holding older package code."""
+    import sys
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+    import fiscalsim.i18n
+    app = str(Path(__file__).resolve().parent.parent / "app.py")
+    at = AppTest.from_file(app, default_timeout=300).run()
+    assert not at.exception, [e.value for e in at.exception]
+    # a running server that imported fiscalsim before new code was pulled
+    old = sys.modules["fiscalsim"]
+    old_i18n = sys.modules["fiscalsim.i18n"]
+    old.SOURCE_STAMP, saved = -1.0, old_i18n.check_label
+    del old_i18n.check_label
+    try:
+        at = AppTest.from_file(app, default_timeout=300).run()
+        assert not at.exception, [e.value for e in at.exception]
+        assert sys.modules["fiscalsim.i18n"] is not old_i18n
+    finally:
+        old_i18n.check_label = saved

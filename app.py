@@ -8,12 +8,30 @@ from __future__ import annotations
 
 import copy
 import pickle
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+
+def drop_stale_package(pkg: str = "fiscalsim") -> None:
+    """Streamlit Community Cloud pulls new commits into a server that keeps running, so modules
+    imported before the pull stay in memory next to the new app.py. Drop them, and cached results
+    built with them, when the package files on disk are newer than the loaded copy."""
+    loaded = sys.modules.get(pkg)
+    if loaded is None:
+        return
+    on_disk = max(p.stat().st_mtime for p in (Path(__file__).parent / pkg).glob("*.py"))
+    if getattr(loaded, "SOURCE_STAMP", None) != on_disk:
+        for name in [m for m in sys.modules if m == pkg or m.startswith(pkg + ".")]:
+            del sys.modules[name]
+        st.cache_resource.clear()
+
+
+drop_stale_package()
 
 from fiscalsim import breakdown, export, upload
 from fiscalsim import config as C
