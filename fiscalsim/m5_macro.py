@@ -40,7 +40,8 @@ def f_trend(y, h):
     return a + b * (len(y) + np.arange(h))
 
 
-def f_arima(y, h):
+def arima_fit(y):
+    """Lowest-AIC ARIMA among a few small orders."""
     best, best_aic = None, np.inf
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -51,7 +52,11 @@ def f_arima(y, h):
                     best, best_aic = m, m.aic
             except Exception:
                 continue
-    return best.forecast(h)
+    return best
+
+
+def f_arima(y, h):
+    return arima_fit(y).forecast(h)
 
 
 def f_prophet(y, h):

@@ -1,0 +1,40 @@
+# Forecast the benchmark series with the pretrained time-series models (Chronos-Bolt, Chronos-2,
+# TimesFM 2.5). They need PyTorch and a download of their weights, which the Streamlit app does not
+# have, so they run here and the forecasts are saved to the `foundation-results` branch. Copy
+# benchmarks/foundation_forecasts.csv.gz and foundation_run.json from there into main; the app and
+# `python -m fiscalsim.run` score them. Only the synthetic series in benchmarks/ are used.
+name: foundation-models
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "fiscalsim/foundation.py"
+      - "benchmarks/macro_series.csv"
+      - "benchmarks/wage_bill_series.csv.gz"
+      - ".github/workflows/foundation.yml"
+permissions:
+  contents: write
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PyTorch (CPU) and the model packages
+        run: |
+          pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt chronos-forecasting==2.3.2 timesfm==3.0.2
+      - name: Forecast
+        run: python -m fiscalsim.foundation run
+      - name: Save the forecasts to the foundation-results branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B foundation-results
+          git add -f benchmarks/foundation_forecasts.csv.gz benchmarks/foundation_run.json
+          git commit -m "Foundation model forecasts (run ${{ github.run_id }}, code ${{ github.sha }})"
+          git push -f origin foundation-results
