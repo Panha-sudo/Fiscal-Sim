@@ -103,7 +103,8 @@ def _fmt(x, d=2):
     return "" if pd.isna(x) else f"{x:.{d}f}"
 
 
-def markdown(ctx, results, table, shap_out, out: Path, runs: int, opt: dict | None = None) -> str:
+def markdown(ctx, results, table, shap_out, out: Path, runs: int, opt: dict | None = None,
+             wave: dict | None = None, risk: dict | None = None) -> str:
     ev = ctx.m1["evaluation"]
     bt2 = ctx.m2_backtest["table"]
     bt5 = ctx.m5_backtest
@@ -218,6 +219,10 @@ def markdown(ctx, results, table, shap_out, out: Path, runs: int, opt: dict | No
     ]
     if opt:
         lines += optimiser_markdown(opt)
+    if wave:
+        lines += wave_markdown(wave)
+    if risk:
+        lines += risk_markdown(risk)
     lines += [
         "## Caveats",
         "",
@@ -261,3 +266,41 @@ def optimiser_markdown(opt: dict) -> list[str]:
                          f"pay rule {b['salary_rule']}.")
         lines += ["", r["front"][cols].round(4).to_markdown(index=False), ""]
     return lines
+
+
+def wave_markdown(wave: dict) -> list[str]:
+    from .wave import HIGH
+    bt = wave["backtest"]
+    nat = wave["national"]["province"]
+    tab = wave["tables"]["province"]
+    cols = ["staff", "mean_age", "aged_50_plus", "leave_5y", "leave_h", "peak_year", "wave_start", "tier", "age", "service"]
+    return ["## Retirement wave early warning", "",
+            "Expected exits of today's staff by unit: retirement by the age rule, deaths by the mortality",
+            "table and separations by the M2 XGBoost hazard. Status quo retirement ages.", "",
+            f"Backtest: staff in post in {bt['origin']}, exits in {bt['years'][0]}-{bt['years'][-1]} by province and "
+            f"sector ({bt['units']} units, {bt['unit_years']} unit-years). DM tests compare each baseline's "
+            "squared errors with the model's (positive = baseline worse).", "",
+            bt["table"].to_markdown(), "",
+            f"Nationally {nat['share_5']:.0%} of today's staff leave within 5 years and {nat['share_h']:.0%} within 10. "
+            f"Units are rated high when their 10-year share is at least {HIGH:.2f} times the national share. "
+            f"SHAP columns (age, service) are percentage points against the national share (surrogate R² "
+            f"{wave['surrogate_r2']:.3f}).", "",
+            tab[cols].head(10).round(3).astype({"wave_start": "Int64"}).astype({"wave_start": "string"}).fillna("").to_markdown(), ""]
+
+
+def risk_markdown(risk: dict) -> list[str]:
+    ev = risk["evaluation"]
+    sc = risk["scenarios"].copy()
+    sc.columns = [f"by {c}" for c in sc.columns]
+    return ["## Pension fund risk alert", "",
+            "Chance the fund's reserve is used up by each year, from the Monte Carlo runs:", "",
+            (sc * 100).round(0).to_markdown(), "",
+            f"AI risk model trained on {ev['train_packages']} simulated reform packages, scored on "
+            f"{ev['test_packages']} it never saw (Brier score and log loss: lower is better; ECE = average gap "
+            "between stated chance and outcome; package error = average gap, in points, between the predicted "
+            "chance and the share of that package's runs that ran out).", "",
+            ev["classifier"].to_markdown(), "",
+            f"Run-out year ranges, target coverage {ev['target_coverage']:.0%}:", "",
+            ev["year_range"].to_markdown(), "",
+            "What moves the run-out year (mean |SHAP|, years):", "",
+            risk["shap"].round(2).rename("years").to_frame().to_markdown(), ""]

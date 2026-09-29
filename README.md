@@ -39,6 +39,8 @@ Uploaded files stay in the viewer's app session and are never written to disk or
 | Compare scenarios | Fan charts with 90% bands for S0 to S6 and any saved custom scenarios, plus the comparison table at 2036, 2046 or 2076 |
 | Build a scenario | Set every policy lever, see the result live against S0, and save up to three custom scenarios to compare and export |
 | AI reform optimiser | Searches retirement age, pension formula, accrual rate and contribution rises (optionally pay policy and hiring) for the best trade-offs between fiscal cost and pension adequacy, recommends the cheapest package meeting a replacement-rate target, and saves it as a custom scenario |
+| Retirement waves | Where and when today's staff will leave, by province, ministry or province and sector: retirements by the age rule, deaths, and early exits predicted by the M2 exit model. Units well above the national share get a High or Watch warning, a heat map shows the wave years, SHAP says why a unit differs (age mix, service, grade), and a backtest shows the accuracy |
+| Pension fund risk | Traffic lights for the chance that the NSSF-C fund runs out by 2030 to 2076 under any scenario, the likely run-out year, and an AI what-if that changes the economic assumptions, with SHAP drivers and a test on reform packages the model never saw |
 | Adequacy and workforce | Replacement rates, the share of retirees on the minimum pension, and headcount |
 | Ministries and provinces | Base-year headcount, age, wage bill and M1 flags by ministry or province, with the projected wage bill under any scenario |
 | What drives results | SHAP charts for policy levers, economic uncertainty and the exit model |
@@ -49,6 +51,8 @@ Uploaded files stay in the viewer's app session and are never written to disk or
 The language switch in the sidebar changes the app between English and Khmer. The Khmer labels in `fiscalsim/i18n.py` are a first translation, so please check the terms against MEF, MCS and NSSF usage.
 
 Ministry and province projections give each unit its base-year share of its sector's projected wage bill, because the engine projects by sector.
+
+In the synthetic data, each province and ministry has a random hiring trend, so some have older staff than others. These trends only exist to show how the retirement-wave warning works; they are not estimates for real provinces.
 
 ## How the modules map to the architecture
 
@@ -62,6 +66,8 @@ Ministry and province projections give each unit its base-year share of its sect
 | M5 Macro forecast | `m5_macro.py` | Naive, 8-year mean, linear trend, ARIMA, Prophet and LSTM models are backtested on 2018-2025. The best one feeds the central path, which then converges to long-run anchors, and AR(1) shocks generate the Monte Carlo paths | Naive and linear trend |
 | M6 Dashboard and SHAP | `m6_explain.py`, `app.py` | SHAP for the exit model, for Monte Carlo uncertainty drivers and for policy levers against uncertainty. The Streamlit dashboard compares scenarios and builds custom ones live | Static tables (`report.md`) |
 | Reform optimiser | `optimize.py` | Surrogate-assisted multi-objective search: Gaussian-process surrogates of the simulator pick which reform packages to score next, and the Pareto front of cost against adequacy comes from simulator runs only. `python -m fiscalsim.run --grid-check` scores every package to check the search against brute force | Scoring every package in the grid |
+| Retirement wave early warning | `wave.py` | Rolls each cohort of today's staff forward (age rule, mortality, XGBoost separation hazard), sums expected exits by unit, flags units well above the national share, and explains the gap with SHAP. Backtested on 2022-2025 from the 2021 staff | Each unit's past exit rate; age rule plus each unit's past resignation rate |
+| Pension fund risk alert | `fund_risk.py` | A gradient-boosted classifier learns P(fund runs out by year) from about 900 simulated reform packages and their Monte Carlo runs; a conformal correction turns its risk curve into a run-out year range with 90% coverage; SHAP shows what moves the date. Scored on packages it never saw | Logistic regression, a year-only base rate, and a linear model with the same conformal range |
 | Policy scenarios | `config.py` | Levers for S0 to S6 as in proposal Table 5 | |
 
 `simulate.py` wires M2 to M4 together. All scenarios share the same random paths, so differences between
@@ -81,3 +87,4 @@ scenarios come from policy rather than sampling noise. `run.py` is the command-l
 1. Replace `data/hrmis_2026.csv` with the aggregated or anonymised MCS extract, using the same columns. Replace `staff_history.parquet` with the yearly HRMIS snapshots.
 2. Put the Budget Law pay scales, NSSF-C rules and NIS, NBC and IMF series into `config.py` and `data/macro_history.csv`.
 3. Rerun `python -m fiscalsim.run` without `--regenerate`, then check the base-year wage bill against the Budget Law total. That check is the model-validity test in proposal Table 6.
+4. Do not commit `outputs/dashboard_bundle.pkl` after building it from real data. It holds staff counts by province, ministry, age and service, and a sample of the input records. Keep real-data builds on a machine or server you control.

@@ -15,7 +15,9 @@ import pandas as pd
 from . import config as C
 from . import m6_explain as m6
 from . import breakdown, report
+from . import fund_risk as R
 from . import optimize as O
+from . import wave as W
 from . import simulate as S
 
 
@@ -87,7 +89,31 @@ def main(argv=None):
             allrows.to_csv(out / f"optimiser_grid_{k}.csv", index=False)
             r["grid_check"] = O.compare_to_grid(r["front"], allrows)
 
+    log("Retirement wave early warning: backtest and unit tables")
+    wave_cells = W.cells(ctx.m1["clean"])
+    wave_bt = W.backtest(ctx.data["history"])
+    wyears = np.arange(C.BASE_YEAR, C.BASE_YEAR + W.HORIZON)
+    wexits = W.exit_paths(wave_cells, ctx.workforce, C.SCENARIOS["S0"], wyears)
+    wave_out = {"backtest": wave_bt, "tables": {}, "national": {}}
+    for level in ("province", "ministry"):
+        tab, nat = W.unit_table(wave_cells, wexits, wyears, level)
+        expl, r2 = W.explain(wave_cells, wexits, level)
+        wave_out["tables"][level] = tab.join(expl)
+        wave_out["national"][level] = {k: v for k, v in nat.items() if k not in ("rate", "by_year")}
+        wave_out["surrogate_r2"] = r2
+
+    log("Pension fund risk alert: simulate reform packages, fit and score the risk model")
+    risk = R.build(ctx)
+    risk["scenarios"] = pd.DataFrame({k: R.simulated_curve(r) for k, r in results.items()}).T
+
     log("Writing outputs")
+    wave_bt["table"].to_csv(out / "wave_backtest.csv")
+    for level, tab in wave_out["tables"].items():
+        tab.to_csv(out / f"wave_by_{level}.csv")
+    risk["evaluation"]["classifier"].to_csv(out / "fund_risk_classifier_test.csv")
+    risk["evaluation"]["year_range"].to_csv(out / "fund_risk_range_test.csv")
+    risk["shap"].rename("mean_abs_shap_years").to_csv(out / "fund_risk_shap.csv")
+    risk["scenarios"].to_csv(out / "fund_risk_by_scenario.csv")
     for k, r in opt.items():
         r["front"].to_csv(out / f"optimiser_front_{k}.csv", index=False)
         r["scored"].to_csv(out / f"optimiser_scored_{k}.csv", index=False)
@@ -118,7 +144,7 @@ def main(argv=None):
     report.chart_fans(results, "total_cost_gdp", charts / "total_cost_gdp_fans.png")
     report.chart_bar(imp_exit.head(10), "M2 exit model: mean |SHAP| (log-odds)", charts / "shap_exit_model.png")
     report.chart_bar(imp_pol, "Total cost 2046: mean |SHAP| (pp of GDP)", charts / "shap_policy.png")
-    report.markdown(ctx, results, table, shap_out, out, args.runs, opt)
+    report.markdown(ctx, results, table, shap_out, out, args.runs, opt, wave_out, risk)
 
     with open(out / "dashboard_bundle.pkl", "wb") as f:
         pickle.dump({"table": table, "fans": fans, "workforce": wf, "adequacy": ad, "shap": shap_out,
@@ -127,7 +153,8 @@ def main(argv=None):
                      "m1": ctx.m1["evaluation"], "m1_types": ctx.m1["recall_by_type"],
                      "m2": ctx.m2_backtest["table"], "km": ctx.km, "m5": ctx.m5_backtest,
                      "m5_choice": ctx.m5_choice, "macro": ctx.data["macro"], "central": ctx.central,
-                     "engine": engine_bundle(ctx), "runs": args.runs, "optimiser": opt}, f)
+                     "engine": engine_bundle(ctx), "runs": args.runs, "optimiser": opt,
+                     "wave_cells": wave_cells, "wave_backtest": wave_bt, "fund_risk": risk}, f)
     log(f"Done. Report: {out / 'report.md'}")
 
 

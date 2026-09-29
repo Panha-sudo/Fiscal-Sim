@@ -5,7 +5,7 @@ creates data with the same fields and plausible structure, calibrated to the
 placeholder totals in `config.py` (proposal section 4.2.1, synthetic fallback).
 
 Outputs:
-  staff_history.parquet    person-year panel 2012-2025 (trains M2)
+  staff_history.parquet    person-year panel 2012-2025 with province and ministry (trains M2)
   hrmis_2026.csv           base-year staff records with injected anomalies (M1 input)
   hrmis_2026_truth.csv     which records are anomalies (for M1 evaluation only)
   pensioners_2026.csv      NSSF-C pensioner register
@@ -134,6 +134,42 @@ def simulate_history(rng, n0: int = 170_000, growth: float = 0.012):
     return pd.concat(frames, ignore_index=True), stock
 
 
+def assign_units(history: pd.DataFrame, stock: pd.DataFrame, seed: int = C.SEED + 2):
+    """Give every person a province and ministry of posting, fixed over their career.
+
+    Postings follow population (Phnom Penh x4 for general administration). Each province and
+    ministry also gets a random hiring trend, so some hired more in recent years and others
+    less, which gives units different age mixes: the pattern a retirement-wave warning looks
+    for. The trends are synthetic, not estimates for real provinces. Uses its own random
+    generator, so every other synthetic draw, and every published result, is unchanged.
+    """
+    rng = np.random.default_rng(seed)
+    people = pd.concat([history[["person_id", "sector", "year", "service"]],
+                        stock.assign(year=C.BASE_YEAR)[["person_id", "sector", "year", "service"]]])
+    people = people.drop_duplicates("person_id")
+    entry = ((people["year"] - people["service"]).to_numpy() - 2010) / 10  # decades from 2010
+
+    def draw(base_w, trend, mask):
+        logw = np.log(base_w)[None, :] + entry[mask, None] * trend[None, :]
+        return np.argmax(logw + rng.gumbel(size=logw.shape), axis=1)  # categorical draw per person
+
+    pop = np.array(PROVINCE_POP, float)
+    prov_trend = rng.normal(0, 0.3, len(PROVINCES))
+    province = np.empty(len(people), dtype=object)
+    ministry = np.empty(len(people), dtype=object)
+    for sector in C.SECTORS:
+        m = (people["sector"] == sector).to_numpy()
+        w = pop.copy()
+        if sector == "general_admin":
+            w[0] *= 4
+        trend = prov_trend + rng.normal(0, 0.15, len(PROVINCES))
+        province[m] = np.array(PROVINCES)[draw(w, trend, m)]
+        names = MINISTRIES[sector]
+        ministry[m] = np.array(names)[draw(np.ones(len(names)), rng.normal(0, 0.25, len(names)), m)]
+    units = pd.DataFrame({"person_id": people["person_id"].to_numpy(), "province": province, "ministry": ministry})
+    return history.merge(units, on="person_id", how="left"), stock.merge(units, on="person_id", how="left")
+
+
 def basic_salary(framework, service):
     base = pd.Series(C.BASE.base_salary)[framework].to_numpy()
     return base * (1 + C.BASE.step_increment) ** np.asarray(service)
@@ -159,6 +195,8 @@ def hrmis_extract(rng, stock: pd.DataFrame):
         w = hq if sector == "general_admin" else pop
         df.loc[m, "province"] = prov_rng.choice(PROVINCES, m.sum(), p=w / w.sum())
     df["ministry"] = [rng.choice(MINISTRIES[s]) for s in df["sector"]]
+    if "province" in stock:  # postings from assign_units; the draws above are kept for the same reason
+        df["province"], df["ministry"] = stock["province"].to_numpy(), stock["ministry"].to_numpy()
     df["basic_salary"] = np.round(basic_salary(df["framework"], df["service"]), -3)
     df["allowance"] = np.round(df["basic_salary"] * df["sector"].map(C.BASE.allowance_rate)
                                * rng.normal(1, 0.08, n), -3)
@@ -237,6 +275,7 @@ def generate(out_dir: Path, seed: int = C.SEED) -> dict:
     rng = np.random.default_rng(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     history, stock = simulate_history(rng)
+    history, stock = assign_units(history, stock)
     hrmis, truth = hrmis_extract(rng, stock)
     pens = pensioner_register(rng)
     macro = macro_history(rng)

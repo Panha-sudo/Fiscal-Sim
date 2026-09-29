@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -35,9 +36,11 @@ drop_stale_package()
 
 from fiscalsim import breakdown, export, upload
 from fiscalsim import config as C
+from fiscalsim import fund_risk as R
 from fiscalsim import m1_data_quality as m1
 from fiscalsim import optimize as O
 from fiscalsim import simulate as S
+from fiscalsim import wave as W
 from fiscalsim.i18n import LANGS, check_label, metric_label, scenario_name, t
 from fiscalsim.report import LABELS, PALETTE
 
@@ -70,7 +73,7 @@ def engine_ctx(stock0=None, pensioners=None):
 def synthetic_state():
     return {"source": "synthetic", "runs": B["runs"], "ctx": engine_ctx(), "base": B["base_breakdown"],
             "frames": {k: B[k] for k in ("table", "fans", "workforce", "adequacy", "wage_bill_sector")},
-            "m1": None}
+            "m1": None, "cells": B.get("wave_cells")}
 
 
 ss = st.session_state
@@ -170,11 +173,11 @@ if D["source"] == "synthetic":
 else:
     st.caption(t("caption_uploaded", lang, n=D["n_records"], flagged=D["n_flagged"], runs=D["runs"]))
 
-tabs = st.tabs([t(k, lang) for k in ("tab_compare", "tab_build", "tab_opt", "tab_adequacy", "tab_units", "tab_drivers",
-                                     "tab_checks", "tab_data", "tab_export")])
+TAB_KEYS = ("tab_compare", "tab_build", "tab_opt", "tab_wave", "tab_risk", "tab_adequacy", "tab_units", "tab_drivers", "tab_checks", "tab_data", "tab_export")
+TAB = dict(zip(TAB_KEYS, st.tabs([t(k, lang) for k in TAB_KEYS])))
 
 # ---------- compare ----------
-with tabs[0]:
+with TAB["tab_compare"]:
     st.plotly_chart(fan_figure(fans, chosen, metric, band), width="stretch")
     h = horizon
     cols = {f"total_cost_gdp_{h}_p50": t("col_total", lang), f"total_cost_gdp_{h}_p5": t("col_p5", lang),
@@ -190,7 +193,7 @@ with tabs[0]:
                                  na_rep="–"), width="stretch")
 
 # ---------- build ----------
-with tabs[1]:
+with TAB["tab_build"]:
     st.write(t("build_intro", lang))
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -254,7 +257,7 @@ def describe(row, lang):
     return "; ".join(parts)
 
 
-with tabs[2]:
+with TAB["tab_opt"]:
     st.write(t("opt_intro", lang))
     pay = st.toggle(t("opt_pay", lang), value=False)
     if pay:
@@ -344,8 +347,192 @@ with tabs[2]:
                                      "opt_cost", "opt_adequacy", "opt_depleted")]
         st.dataframe(show[cols if pay else cols[:3] + cols[5:]], width="stretch", hide_index=True)
 
+# ---------- shared by the retirement-wave and fund-risk tabs ----------
+def scenario_of(k):
+    return C.SCENARIOS[k] if k in C.SCENARIOS else ss["custom"][k][0]
+
+
+def unit_name(u):
+    parts = u if isinstance(u, tuple) else (u,)
+    return " · ".join(t(f"sector_{p}", lang) if p in C.SECTORS else str(p) for p in parts)
+
+
+def depletion_of(k):
+    """Run-out year per Monte Carlo run for a scenario (cached per data source)."""
+    if k in ss["custom"]:
+        return R.depletion(ss["custom"][k][1])
+    cache = ss.setdefault("depletion", {})
+    if (D["source"], k) not in cache:
+        cache[(D["source"], k)] = R.depletion(S.run_scenario(D["ctx"], C.SCENARIOS[k]))
+    return cache[(D["source"], k)]
+
+
+LEVELS = {"province": ["province"], "ministry": ["ministry"], "province_sector": ["province", "sector"]}
+TIER_COLORS = {"high": "#c0392b", "watch": "#d68910", "normal": "#1e8449", "few_staff": "#8a8a8a"}
+LIGHT_COLORS = {"green": "#1e8449", "amber": "#e0a100", "red": "#c0392b"}
+LIGHT_YEARS = (2030, 2035, 2040, 2050, 2060, 2076)
+
+
+def lights(probs):
+    cols = st.columns(len(probs))
+    for col, (year, p) in zip(cols, probs.items()):
+        light = R.traffic_light(p)
+        col.markdown(
+            f"<div style='text-align:center'><div style='width:30px;height:30px;border-radius:50%;margin:0 auto 4px;"
+            f"background:{LIGHT_COLORS[light]}'></div><div style='font-weight:600'>{t('risk_by', lang, y=year)}</div>"
+            f"<div style='font-size:1.3rem'>{p:.0%}</div><div style='font-size:0.8rem;opacity:0.75'>"
+            f"{t(f'light_{light}', lang)}</div></div>", unsafe_allow_html=True)
+
+
+def year_text(y):
+    return t("risk_after", lang) if y > C.END_YEAR else str(int(y))
+
+
+# ---------- retirement waves ----------
+with TAB["tab_wave"]:
+    st.write(t("wave_intro", lang))
+    if D.get("cells") is None:
+        st.info(t("wave_missing", lang))
+    else:
+        opts = list(C.SCENARIOS) + list(ss["custom"])
+        c1, c2, c3 = st.columns([2, 3, 2])
+        wsc = c1.selectbox(t("wave_scenario", lang), opts, format_func=label, key="wave_sc")
+        lvl = c2.radio(t("wave_level", lang), list(LEVELS), format_func=lambda k: t(f"lvl_{k}", lang),
+                       horizontal=True, key="wave_lvl")
+        hz = c3.slider(t("wave_horizon", lang), 5, 15, 10, key="wave_hz")
+        if D["source"] != "synthetic":
+            st.caption(t("wave_upload_note", lang))
+        wcells = D["cells"]
+        wyears = np.arange(C.BASE_YEAR, C.BASE_YEAR + W.HORIZON)
+        wex = W.exit_paths(wcells, D["ctx"].workforce, scenario_of(wsc), wyears)
+        wtab, wnat = W.unit_table(wcells, wex, wyears, LEVELS[lvl], hz)
+        k1, k2, k3 = st.columns(3)
+        k1.metric(t("wave_staff", lang), f"{wnat['staff']:,.0f}")
+        k2.metric(t("wave_leave_h", lang, h=hz), f"{wnat['share_h']:.0%}")
+        k3.metric(t("wave_high_units", lang), f"{int((wtab.tier == 'high').sum())} / {len(wtab)}")
+
+        top = wtab[wtab.tier != "few_staff"].head(15)
+        heat = wnat["by_year"].reindex(top.index).div(top["staff"], axis=0).iloc[:, :hz] * 100
+        st.subheader(t("wave_heat", lang))
+        fig = go.Figure(go.Heatmap(z=heat.values, x=[str(y) for y in heat.columns], y=[unit_name(u) for u in heat.index],
+                                   colorscale="YlOrRd", colorbar=dict(title="%"),
+                                   hovertemplate="%{y} %{x}: %{z:.1f}%<extra></extra>"))
+        fig.update_layout(height=max(320, 28 * len(heat) + 80), yaxis=dict(autorange="reversed"),
+                          margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+        st.subheader(t("wave_table", lang))
+        show = pd.DataFrame({
+            t("col_unit", lang): [unit_name(u) for u in wtab.index],
+            t("col_tier", lang): [t(f"tier_{x}", lang) for x in wtab.tier],
+            t("col_staff", lang): wtab.staff.round(0).astype(int).to_numpy(),
+            t("col_mean_age", lang): wtab.mean_age.round(1).to_numpy(),
+            t("col_50plus", lang): (wtab.aged_50_plus * 100).round(1).to_numpy(),
+            t("col_leave5", lang): (wtab.leave_5y * 100).round(1).to_numpy(),
+            t("col_leaveh", lang, h=hz): (wtab.leave_h * 100).round(1).to_numpy(),
+            t("col_vs", lang): wtab.vs_national.round(2).to_numpy(),
+            t("col_peak", lang): wtab.peak_year.to_numpy(),
+            t("col_wave_start", lang): [("" if pd.isna(x) else str(int(x))) for x in wtab.wave_start],
+        })
+        tier_col = t("col_tier", lang)
+        colour = {t(f"tier_{k}", lang): v for k, v in TIER_COLORS.items()}
+        fmt = {t("col_staff", lang): "{:,}", t("col_vs", lang): "{:.2f}"} | {
+            t(k, lang, h=hz): "{:.1f}" for k in ("col_mean_age", "col_50plus", "col_leave5", "col_leaveh")}
+        st.dataframe(show.style.format(fmt)
+                     .map(lambda v: f"color: {colour.get(v, 'inherit')}; font-weight: 600", subset=[tier_col]),
+                     width="stretch", hide_index=True)
+        st.caption(t("wave_rule", lang, high=W.HIGH, watch=W.WATCH, wave=W.WAVE_FACTOR))
+
+        st.subheader(t("wave_why", lang))
+        ekey = (D["source"], wsc, repr(scenario_of(wsc)), lvl, hz)
+        cache = ss.setdefault("wave_explain", {})
+        if ekey not in cache:
+            with st.spinner(t("wave_explaining", lang)):
+                cache[ekey] = W.explain(wcells, wex, LEVELS[lvl], hz)[0]
+        expl = cache[ekey]
+        rated = [u for u in wtab.index if wtab.loc[u, "tier"] != "few_staff"] or list(wtab.index)
+        unit = st.selectbox(t("wave_why_unit", lang), rated, format_func=unit_name)
+        contrib = expl.loc[unit].rename(lambda g: t(f"grp_{g}", lang)).sort_values()
+        st.plotly_chart(hbar(contrib, t("wave_why_axis", lang)), width="stretch")
+        driver = contrib.abs().idxmax()
+        st.write(t("wave_why_text", lang, unit=unit_name(unit), share=wtab.loc[unit, "leave_h"], h=hz,
+                   nat=wnat["share_h"], driver=driver.lower() if lang == "en" else driver, pp=contrib[driver]))
+        bt = B.get("wave_backtest")
+        if bt:
+            with st.expander(t("wave_check", lang)):
+                st.write(t("wave_check_text", lang, origin=bt["origin"], y0=bt["years"][0], y1=bt["years"][-1],
+                           units=bt["units"]))
+                st.dataframe(bt["table"], width="stretch")
+
+# ---------- pension fund risk ----------
+with TAB["tab_risk"]:
+    st.write(t("risk_intro", lang))
+    opts = list(C.SCENARIOS) + list(ss["custom"])
+    rsc = st.selectbox(t("risk_scenario", lang), opts, format_func=label, key="risk_sc")
+    dep = depletion_of(rsc)
+    st.subheader(t("risk_sim_title", lang, runs=len(dep)))
+    lights(pd.Series({y: float((dep <= y).mean()) for y in LIGHT_YEARS}))
+    st.write("")
+    ran_out = dep[dep <= C.END_YEAR]
+    if len(ran_out) >= 0.5 * len(dep):
+        st.write(t("risk_sim_year", lang, med=year_text(np.median(dep)), lo=year_text(np.percentile(dep, 5)),
+                   hi=year_text(np.percentile(dep, 95))))
+    if len(ran_out) < len(dep):
+        st.write(t("risk_sim_never", lang, p=1 - len(ran_out) / len(dep)))
+
+    RK = B.get("fund_risk")
+    if RK:
+        model = RK["model"]
+        st.subheader(t("risk_ai_title", lang))
+        st.caption(t("risk_ai_note", lang, n=RK["evaluation"]["train_packages"]))
+        if D["source"] != "synthetic":
+            st.caption(t("risk_ai_upload", lang))
+        rng_ = RK["driver_ranges"]
+        cen = RK["central"]
+        a1, a2, a3, a4 = st.columns(4)
+        slider = lambda col, key, name, step: col.slider(
+            t(key, lang), float(np.floor(rng_[name].iloc[0] / step) * step), float(np.ceil(rng_[name].iloc[1] / step) * step),
+            float(round(cen[name] / step) * step), step, key=f"risk_{name}")
+        assume = {"avg_inflation": slider(a1, "a_inflation", "avg_inflation", 0.1),
+                  "avg_fund_real_return": slider(a2, "a_return", "avg_fund_real_return", 0.1),
+                  "avg_real_growth": slider(a3, "a_growth", "avg_real_growth", 0.1),
+                  "mortality_level": slider(a4, "a_mortality", "mortality_level", 0.01)}
+        feats = {**R.lever_features(scenario_of(rsc)), **assume}
+        lights(model.curve(feats, LIGHT_YEARS))
+        st.write("")
+        med, lo, hi = model.year_range(feats)
+        st.write(t("risk_ai_year", lang, med=year_text(med), lo=year_text(lo), hi=year_text(hi)))
+
+        grid = model.GRID[model.GRID <= C.END_YEAR]
+        ai_curve = model.cdf(pd.DataFrame([feats]))[0][: len(grid)]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=grid, y=[(dep <= y).mean() * 100 for y in grid], name=t("risk_chart_sim", lang),
+                                 line=dict(color=PALETTE[0], width=2, shape="hv")))
+        fig.add_trace(go.Scatter(x=grid, y=ai_curve * 100, name=t("risk_chart_ai", lang),
+                                 line=dict(color=CUSTOM_COLOR, width=2, dash="dash")))
+        for y0, y1, c in ((0, 10, LIGHT_COLORS["green"]), (10, 50, LIGHT_COLORS["amber"]), (50, 100, LIGHT_COLORS["red"])):
+            fig.add_hrect(y0=y0, y1=y1, fillcolor=c, opacity=0.06, line_width=0)
+        fig.update_layout(height=360, yaxis=dict(title="%", range=[0, 101]), hovermode="x unified",
+                          title=t("risk_chart", lang), margin=dict(l=10, r=10, t=40, b=10),
+                          legend=dict(orientation="h", x=0, y=-0.15))
+        st.plotly_chart(fig, width="stretch")
+
+        c1, c2 = st.columns(2)
+        local = model.shap_local(feats)
+        local = local[local.abs().sort_values(ascending=False).index[:8]].rename(lambda f: t(f"f_{f}", lang))
+        c1.subheader(t("risk_why", lang))
+        c1.plotly_chart(hbar(local, "SHAP"), width="stretch")
+        c2.subheader(t("risk_drivers", lang))
+        c2.plotly_chart(hbar(RK["shap"].head(8).rename(lambda f: t(f"f_{f}", lang)), "|SHAP|"), width="stretch")
+        ev = RK["evaluation"]
+        with st.expander(t("risk_check", lang)):
+            st.write(t("risk_check_text", lang, train=ev["train_packages"], test=ev["test_packages"],
+                       cov=ev["target_coverage"]))
+            st.dataframe(ev["classifier"], width="stretch")
+            st.dataframe(ev["year_range"], width="stretch")
+
 # ---------- adequacy and workforce ----------
-with tabs[3]:
+with TAB["tab_adequacy"]:
     ad = F["adequacy"].reset_index()
     st.subheader(t("adequacy_title", lang))
     st.plotly_chart(line_figure(ad, "avg_replacement", chosen, t("rr_axis", lang), 100), width="stretch")
@@ -356,7 +543,7 @@ with tabs[3]:
     st.plotly_chart(line_figure(wf, "total", chosen, t("headcount_axis", lang)), width="stretch")
 
 # ---------- ministries and provinces ----------
-with tabs[4]:
+with TAB["tab_units"]:
     st.caption(t("units_intro", lang))
     c1, c2 = st.columns(2)
     level = c1.radio(t("units_level", lang), ["ministry", "province"], format_func=lambda x: t(x, lang), horizontal=True)
@@ -395,7 +582,7 @@ with tabs[4]:
                                                 margin=dict(l=10, r=10, t=40, b=10)), width="stretch")
 
 # ---------- drivers ----------
-with tabs[5]:
+with TAB["tab_drivers"]:
     sh = B["shap"]
     c1, c2 = st.columns(2)
     c1.subheader(t("drivers_policy", lang))
@@ -406,7 +593,7 @@ with tabs[5]:
     st.plotly_chart(hbar(sh["exit"].head(10), t("shap_axis_logodds", lang)), width="stretch")
 
 # ---------- checks ----------
-with tabs[6]:
+with TAB["tab_checks"]:
     st.subheader(t("checks_m1", lang))
     st.info(t("m1_note", lang))
     if D["source"] == "synthetic":
@@ -429,7 +616,7 @@ with tabs[6]:
     st.caption(f"{t('checks_chosen', lang)}: {B['m5_choice']}")
 
 # ---------- your data ----------
-with tabs[7]:
+with TAB["tab_data"]:
     st.write(t("data_intro", lang))
     st.download_button(t("data_template", lang), upload.template_csv(B.get("hrmis_sample")),
                        file_name="hrmis_template.csv", mime="text/csv")
@@ -456,7 +643,7 @@ with tabs[7]:
                     results = {k: S.run_scenario(ctx, sc) for k, sc in C.SCENARIOS.items()}
                     ss["data"] = {"source": f_hr.name, "runs": len(E["paths"]["cpi"]), "ctx": ctx,
                                   "base": breakdown.base_table(r1["records"]),
-                                  "frames": S.results_frames(results), "m1": r1,
+                                  "frames": S.results_frames(results), "m1": r1, "cells": W.cells(r1["clean"]),
                                   "n_records": len(recs), "n_flagged": int(r1["records"]["flag"].sum())}
                     ss["custom"] = {k: (sc, S.run_scenario(ctx, sc)) for k, (sc, _) in ss["custom"].items()}
                 st.rerun()
@@ -480,7 +667,7 @@ with tabs[7]:
             st.rerun()
 
 # ---------- export ----------
-with tabs[8]:
+with TAB["tab_export"]:
     st.write(t("export_intro", lang))
     base = D["base"]
     scen = dict(C.SCENARIOS) | {k: sc for k, (sc, _) in ss["custom"].items()}

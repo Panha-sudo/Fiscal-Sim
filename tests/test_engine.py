@@ -18,6 +18,7 @@ from types import SimpleNamespace
 def small():
     rng = np.random.default_rng(1)
     history, stock = synthetic.simulate_history(rng, n0=6000)
+    history, stock = synthetic.assign_units(history, stock)
     hrmis, truth = synthetic.hrmis_extract(rng, stock)
     macro = synthetic.macro_history(rng)
     wm = m2.fit_projection_model(history, sample_frac=1.0)
@@ -143,3 +144,38 @@ def test_app_runs_and_recovers_from_stale_modules():
         assert sys.modules["fiscalsim.i18n"] is not old_i18n
     finally:
         old_i18n.check_label = saved
+
+
+def test_wave_tables_backtest_and_explanation(small):
+    from fiscalsim import wave as W
+    bt = W.backtest(small["history"], level=("province",))
+    assert set(bt["table"].index) == {"model", "past_rate", "rule_plus_avg"}
+    assert (bt["table"]["WAPE_%"] >= 0).all()
+    clean = m1.run(small["hrmis"])["clean"]
+    c = W.cells(clean)
+    assert "full_name" not in c and c["n"].sum() <= len(clean)
+    years = np.arange(C.BASE_YEAR, C.BASE_YEAR + W.HORIZON)
+    ex = W.exit_paths(c, small["ctx"].workforce, C.SCENARIOS["S0"], years)
+    assert (ex.sum(axis=1) <= c["n"].to_numpy() + 1e-9).all()
+    tab, nat = W.unit_table(c, ex, years, "province")
+    assert tab["leave_h"].between(0, 1).all() and set(tab["tier"]) <= {"high", "watch", "normal", "few_staff"}
+    ex3 = W.exit_paths(c, small["ctx"].workforce, C.SCENARIOS["S3"], years)
+    assert W.unit_table(c, ex3, years, "province")[1]["share_5"] < nat["share_5"]  # later retirement, fewer exits
+    expl, r2 = W.explain(c, ex, "province")
+    gap = (tab["leave_h"] - nat["share_h"]) * 100
+    assert r2 > 0.95
+    assert np.allclose(expl.sum(axis=1).reindex(gap.index), gap, atol=1.0)  # SHAP adds up to each unit's gap
+
+
+def test_fund_risk_model(small):
+    from fiscalsim import fund_risk as R
+    runs = R.training_runs(small["ctx"], n_random=40, paths=10)
+    out = R.from_runs(runs, small["ctx"].paths)
+    model = out["model"]
+    f = {**R.lever_features(C.SCENARIOS["S0"]), **out["central"]}
+    curve = model.curve(f)
+    assert (np.diff(curve.to_numpy()) >= -1e-9).all()  # risk never falls with time
+    med, lo, hi = model.year_range(f)
+    assert lo <= med <= hi
+    assert {"ai_risk_model", "logistic_regression", "year_only_base_rate"} <= set(out["evaluation"]["classifier"].index)
+    assert [R.traffic_light(p) for p in (0.05, 0.3, 0.7)] == ["green", "amber", "red"]
