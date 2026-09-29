@@ -39,11 +39,13 @@ from fiscalsim import assistant_eval as AE
 from fiscalsim import breakdown, export, upload
 from fiscalsim import knowledge as K
 from fiscalsim import config as C
+from fiscalsim import foundation as FD
 from fiscalsim import fund_risk as R
 from fiscalsim import m1_data_quality as m1
 from fiscalsim import optimize as O
 from fiscalsim import simulate as S
 from fiscalsim import wave as W
+from fiscalsim.i18n import EN as I18N_EN
 from fiscalsim.i18n import LANGS, check_label, metric_label, scenario_name, t
 from fiscalsim.report import LABELS, PALETTE
 
@@ -99,7 +101,8 @@ with st.sidebar:
 if lang == "km":  # Khmer webfont, with Windows and macOS Khmer fonts as fallbacks
     st.markdown("""<style>@import url('https://fonts.googleapis.com/css2?family=Kantumruy+Pro:wght@400;600;700&display=swap');
     html, body, [class*="st-"], h1, h2, h3, p, label, button, div {font-family: "Kantumruy Pro", "Khmer UI", "Khmer OS",
-    "Noto Sans Khmer", "Leelawadee UI", sans-serif;}</style>""", unsafe_allow_html=True)
+    "Noto Sans Khmer", "Leelawadee UI", sans-serif;}
+    [data-testid="stIconMaterial"] {font-family: "Material Symbols Rounded" !important;}</style>""", unsafe_allow_html=True)
 
 
 def custom_frames():
@@ -176,7 +179,7 @@ if D["source"] == "synthetic":
 else:
     st.caption(t("caption_uploaded", lang, n=D["n_records"], flagged=D["n_flagged"], runs=D["runs"]))
 
-TAB_KEYS = ("tab_compare", "tab_ask", "tab_build", "tab_opt", "tab_wave", "tab_risk", "tab_adequacy", "tab_units", "tab_drivers", "tab_checks", "tab_data", "tab_export")
+TAB_KEYS = ("tab_compare", "tab_ask", "tab_build", "tab_opt", "tab_wave", "tab_risk", "tab_forecast", "tab_adequacy", "tab_units", "tab_drivers", "tab_checks", "tab_data", "tab_export")
 TAB = dict(zip(TAB_KEYS, st.tabs([t(k, lang) for k in TAB_KEYS])))
 
 # ---------- compare ----------
@@ -631,6 +634,174 @@ with TAB["tab_risk"]:
                        cov=ev["target_coverage"]))
             st.dataframe(ev["classifier"], width="stretch")
             st.dataframe(ev["year_range"], width="stretch")
+
+# ---------- AI forecasts: wage bill by unit, pretrained models for the macro series ----------
+MODEL_COLORS = {"chronos_2": PALETTE[1], "timesfm_2_5": PALETTE[2], "chronos_bolt": PALETTE[4], "arima": PALETTE[0],
+                "lstm": PALETTE[6], "prophet": "#8c8c8c", "linear_trend": "#a6a6a6", "mean_8y": "#bdbdbd", "naive": "#d0d0d0"}
+
+
+def model_name(m):
+    return t(f"fmn_{m}", lang) if f"fmn_{m}" in I18N_EN else FD.NAMES.get(m, m)
+
+
+def unit_name(sid):
+    if sid == "national":
+        return t("hf_national", lang)
+    level, name = sid.split(":", 1)
+    return t(f"sector_{name}", lang) if level == "sector" else name
+
+
+def units_forecast(HR):
+    f = HR["forecast"]
+    st.write(t("hf_intro", lang))
+    last, end = int(f[f.kind == "history"].year.max()), int(f.year.max())
+    nat = f[f.series == "national"].set_index(["kind", "year"])["wage_bill_bn"]
+    bn = t("hf_bn", lang)
+    c = st.columns(4)
+    c[0].metric(t("hf_now", lang, y=last), f"{nat[('history', last)]:,.0f} {bn}")
+    c[1].metric(t("hf_then", lang, y=end), f"{nat[('forecast', end)]:,.0f} {bn}")
+    c[2].metric(t("hf_growth", lang), f"{(nat[('forecast', end)] / nat[('history', last)]) ** (1 / (end - last)) - 1:.1%}")
+    c[3].metric(t("hf_gap", lang), f"{HR['gap']['province']:.2f}%", help=t("hf_gap_help", lang))
+
+    c1, c2 = st.columns(2)
+    level = c1.radio(t("hf_level", lang), ["province", "ministry", "sector"], format_func=lambda k: t(f"hl_{k}", lang),
+                     horizontal=True, key="hf_level")
+    size = (f[(f.level == level) & (f.kind == "history") & (f.year == last)]
+            .set_index("series")["wage_bill_bn"].sort_values(ascending=False))
+    unit = c2.selectbox(t("hf_unit", lang), ["national", *size.index], format_func=unit_name, key=f"hf_unit_{level}")
+
+    d = f[f.series == unit]
+    hist = d[d.kind == "history"]
+    joined = lambda k: ([last] + list(d[d.kind == k].year), [hist.wage_bill_bn.iloc[-1]] + list(d[d.kind == k].wage_bill_bn))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hist.year, y=hist.wage_bill_bn, name=t("hf_hist", lang), line=dict(color=PALETTE[0], width=2)))
+    x, y = joined("forecast")
+    fig.add_trace(go.Scatter(x=x, y=y, name=t("hf_fc", lang), line=dict(color=PALETTE[1], width=2.5)))
+    x, y = joined("base")
+    fig.add_trace(go.Scatter(x=x, y=y, name=t("hf_base", lang), line=dict(color="#8c8c8c", width=1.5, dash="dot")))
+    fig.update_layout(height=360, hovermode="x unified", yaxis_title=bn, title=t("hf_chart", lang, u=unit_name(unit)),
+                      margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h", x=0, y=-0.15))
+    fig.update_traces(hovertemplate="%{y:,.1f}")
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader(t("hf_table", lang, lvl=t(f"hl_pl_{level}", lang)))
+    cur = f[f.kind.isin(["history", "forecast"]) & (f.year >= last)]
+    tab = cur[cur.level == level].pivot_table(index="series", columns="year", values="wage_bill_bn").loc[size.index]
+    tab.loc["__sum__"] = tab.sum()
+    tab.loc["national"] = cur[cur.series == "national"].set_index("year")["wage_bill_bn"]
+    gcol = t("hf_col_growth", lang, a=last, b=end)
+    tab[gcol] = tab[end] / tab[last] - 1
+    tab.index = [t("hf_sum", lang) if s == "__sum__" else unit_name(s) for s in tab.index]
+    tab.columns = [str(c) for c in tab.columns]
+    tab.index.name = t(f"hl_{level}", lang)
+    st.dataframe(tab.style.format({**{str(y): "{:,.1f}" for y in range(last, end + 1)}, gcol: "{:+.1%}"})
+                 .map(lambda _: "font-weight: 600", subset=pd.IndexSlice[tab.index[-2:], :]),
+                 width="stretch", height=min(36 * len(tab) + 40, 460))
+    st.caption(t("hf_sum_note", lang, s=tab[str(end)].iloc[-2], y=end, n=tab[str(end)].iloc[-1]))
+
+    with st.expander(t("hf_check", lang)):
+        tables = HR["tables"]
+        wins = ", ".join(t("hf_wins_item", lang, a=t(f"hm_{k}", lang).lower() if lang == "en" else t(f"hm_{k}", lang), p=v)
+                         for k, v in HR["wins"].items())
+        st.write(t("hf_check_text", lang, o0=HR["origins"][0], o1=HR["origins"][-1], h=HR["max_h"],
+                   m=f"{model_name(HR['base_model'])} + {t('hm_' + HR['method'], lang)}", w=wins))
+        show = tables[HR["base_model"]].rename(index=lambda m: t(f"hm_{m}", lang), columns=lambda c: t(f"hl_{c}", lang))
+        show.index.name, show.columns.name = None, None
+        st.dataframe(show.style.format("{:.2f}").highlight_min(axis=0, props="font-weight: 700"), width="stretch")
+        if len(tables) > 1:
+            st.write(t("hf_check_fm", lang))
+            comp = pd.DataFrame({model_name(b): v["average"] for b, v in tables.items()})
+            comp = comp.rename(index=lambda m: t(f"hm_{m}", lang)).rename_axis(None).rename_axis(t("hf_base_col", lang), axis=1)
+            st.dataframe(comp.style.format("{:.2f}").highlight_min(axis=None, props="font-weight: 700"), width="stretch")
+
+
+def macro_models(FMR):
+    st.write(t("fm_intro", lang))
+    if not any(m in FD.FOUNDATION for m in FMR["models"]):
+        st.info(t("fm_not_run", lang))
+    else:
+        st.caption(t("fm_ran", lang, date=FMR.get("info", {}).get("date", "")))
+    st.subheader(t("fm_summary", lang, h=FMR["h"], o0=FMR["origins"][0], o1=FMR["origins"][-1]))
+    ov = FMR["overall"].sort_values("rel_MAE_vs_naive")
+    cols = {"rel_MAE_vs_naive": t("fm_col_rel", lang), "mean_rank": t("fm_col_rank", lang),
+            "coverage_80_pct": t("fm_col_cov", lang), "quantile_loss_pp": t("fm_col_ql", lang)}
+    fmts = {"rel_MAE_vs_naive": "{:.2f}", "mean_rank": "{:.1f}", "coverage_80_pct": "{:.0f}", "quantile_loss_pp": "{:.2f}"}
+    # text cells, so models without a range show a dash rather than the table's "None"
+    show = pd.DataFrame({cols[c]: [("–" if pd.isna(v) else f.format(v)) for v in ov[c]] for c, f in fmts.items()})
+    bold = pd.DataFrame({cols[c]: ["font-weight: 700" if c != "coverage_80_pct" and v == ov[c].min() else ""
+                                   for v in ov[c]] for c in fmts})
+    show.insert(0, t("fm_col_type", lang), [t("fm_type_found" if m in FD.FOUNDATION else "fm_type_m5", lang) for m in ov.index])
+    show.index = bold.index = [model_name(m) for m in ov.index]
+    show.index.name = t("fm_col_model", lang)
+    st.dataframe(show.style.apply(lambda _: bold, axis=None, subset=list(bold.columns)), width="stretch")
+    st.caption(t("fm_summary_note", lang))
+
+    target = st.radio(t("fm_series", lang), list(FD.m5.TARGETS), format_func=lambda k: t(f"fm_{k}", lang),
+                      horizontal=True, key="fm_target")
+    roll = FMR["rolling"][FMR["rolling"].target == target].set_index("model")
+    c1, c2 = st.columns(2)
+    fig = go.Figure()
+    hs = list(range(1, FMR["h"] + 1))
+    for m in FMR["models"]:
+        found = m in FD.FOUNDATION
+        fig.add_trace(go.Scatter(x=hs, y=[roll.loc[m, f"MAE_h{h}"] for h in hs], name=model_name(m), mode="lines+markers",
+                                 line=dict(color=MODEL_COLORS.get(m), width=3 if found else 1.5, dash=None if found else "dot")))
+    fig.update_layout(height=380, title=t("fm_by_h", lang), xaxis=dict(title=t("fm_h_axis", lang), dtick=1),
+                      yaxis_title=t("fm_err_axis", lang), hovermode="x unified", margin=dict(l=10, r=10, t=40, b=10),
+                      legend=dict(orientation="h", x=0, y=-0.2))
+    c1.plotly_chart(fig, width="stretch")
+
+    macro = B["macro"]
+    last = int(macro["year"].max())
+    fut = FMR["future"][FMR["future"].series == target]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=macro["year"], y=macro[target] * 100, name=t("fm_history", lang), line=dict(color="#333", width=2)))
+    for m in [m for m in FMR["models"] if m in FD.FOUNDATION or m == "arima"]:
+        d = fut[fut.model == m].sort_values("year")
+        col = MODEL_COLORS.get(m)
+        fig.add_trace(go.Scatter(x=list(d.year) + list(d.year[::-1]), y=list(d.q90 * 100) + list(d.q10[::-1] * 100),
+                                 fill="toself", fillcolor=col, opacity=0.12, line=dict(width=0), hoverinfo="skip",
+                                 showlegend=False))
+        fig.add_trace(go.Scatter(x=d.year, y=d.q50 * 100, name=model_name(m), line=dict(color=col, width=2)))
+    cen = B["central"][target].iloc[:len(fut["year"].unique())] * 100
+    fig.add_trace(go.Scatter(x=cen.index, y=cen.values, name=t("fm_m5_path", lang), line=dict(color="#333", width=2, dash="dash")))
+    shown = np.r_[macro.loc[macro.year >= last - 15, target], fut.q10.dropna(), fut.q90.dropna(), cen / 100] * 100
+    pad = 0.1 * (shown.max() - shown.min())
+    fig.update_layout(height=380, title=t("fm_future", lang, y=last), hovermode="x unified",
+                      yaxis=dict(title="%", range=[shown.min() - pad, shown.max() + pad]),
+                      xaxis=dict(range=[last - 15, int(fut.year.max()) + 0.5]), margin=dict(l=10, r=10, t=40, b=10),
+                      legend=dict(orientation="h", x=0, y=-0.2))
+    fig.update_traces(hovertemplate="%{y:.1f}")
+    c2.plotly_chart(fig, width="stretch")
+
+    if "p_vs_arima" in roll:
+        with st.expander(t("fm_dm", lang)):
+            dm = roll.loc[[m for m in roll.index if m in FD.FOUNDATION], ["DM_vs_arima", "p_vs_arima", "DM_vs_lstm", "p_vs_lstm"]]
+            dm.index = [model_name(m) for m in dm.index]
+            st.dataframe(dm.style.format("{:.2f}", na_rep="–"), width="stretch")
+            st.caption(t("fm_dm_text", lang, n=len(FMR["origins"])))
+    with st.expander(t("fm_same", lang, y0=FD.m5.TRAIN_END, y1=FD.m5.TRAIN_END + 1, y2=last)):
+        same = FMR["same_as_m5"].pivot(index="model", columns="target", values="MAPE_%")[list(FD.m5.TARGETS)]
+        same = same.reindex([m for m in ov.index if m in same.index])
+        same.index = [model_name(m) for m in same.index]
+        same.columns = [t(f"fm_{c}", lang) for c in same.columns]
+        st.dataframe(same.style.format("{:.2f}").highlight_min(axis=0, props="font-weight: 700"), width="stretch")
+        st.caption(t("fm_same_note", lang, n=len(FMR["origins"])))
+
+
+with TAB["tab_forecast"]:
+    HR, FMR = B.get("hierarchy"), B.get("foundation")
+    if not HR or not FMR:
+        st.info(t("fc_missing", lang))
+    else:
+        if D["source"] != "synthetic":
+            st.caption(t("fc_upload_note", lang))
+        part = st.radio(t("fc_show", lang), ["units", "macro"], format_func=lambda k: t(f"fc_part_{k}", lang),
+                        horizontal=True, key="fc_part")
+        if part == "units":
+            units_forecast(HR)
+        else:
+            macro_models(FMR)
 
 # ---------- adequacy and workforce ----------
 with TAB["tab_adequacy"]:

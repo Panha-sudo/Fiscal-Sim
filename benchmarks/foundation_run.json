@@ -1,0 +1,36 @@
+{
+  "models": {
+    "chronos_bolt": {
+      "repo": "amazon/chronos-bolt-base",
+      "parameters": "205M",
+      "status": "ok",
+      "rows": 20694,
+      "load_seconds": 10.2,
+      "forecast_seconds": 16.1
+    },
+    "chronos_2": {
+      "repo": "amazon/chronos-2",
+      "parameters": "120M",
+      "status": "ok",
+      "rows": 20694,
+      "load_seconds": 3.7,
+      "forecast_seconds": 18.8
+    },
+    "timesfm_2_5": {
+      "repo": "google/timesfm-2.5-200m-pytorch",
+      "parameters": "200M",
+      "status": "ok",
+      "rows": 20694,
+      "load_seconds": 5.4,
+      "forecast_seconds": 58.0
+    }
+  },
+  "python": "3.11.16",
+  "date": "2026-09-29",
+  "run": "https://github.com/Panha-sudo/Fiscal-Sim/actions/runs/36599561361",
+  "code": "1bf2877534a711d0770d8a9e7a9960d3165bd68c",
+  "torch": "2.14.0+cpu",
+  "chronos": "2.3.2",
+  "timesfm": null,
+  "transformers": "5.17.0"
+}

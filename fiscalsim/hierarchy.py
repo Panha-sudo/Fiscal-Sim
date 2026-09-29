@@ -203,52 +203,58 @@ def coherence_gap(errors: pd.DataFrame, H: Hierarchy) -> dict:
     return out
 
 
-def best_method(table: pd.DataFrame) -> str:
-    return str(table.loc[[m for m in COHERENT if m in table.index], "average"].idxmin())
+def best(tables: dict) -> tuple[str, str]:
+    """(base forecaster, reconciliation method) with the lowest average WAPE over the levels."""
+    pairs = [(b, m) for b, t in tables.items() for m in COHERENT if m in t.index]
+    return min(pairs, key=lambda bm: tables[bm[0]].loc[bm[1], "average"])
 
 
-def forecast(cells: pd.DataFrame, method: str, H: Hierarchy | None = None, h: int = FUTURE_H) -> pd.DataFrame:
+def forecast(cells: pd.DataFrame, method: str, H: Hierarchy | None = None, h: int = FUTURE_H,
+             base_fn=ets_base) -> pd.DataFrame:
     """Reconciled forecasts for the years after the history, with the history (long table)."""
     H = H or structure(cells.index)
     years = np.array(cells.columns)
     X = cells.to_numpy()
     Y = H.S @ X
-    yhat, res = ets_base(Y, h)
+    yhat, res = base_fn(Y, h, int(years[-1]))
     f = reconcile(method, H.S, yhat, res, average_shares(X))
     fut = years[-1] + np.arange(1, h + 1)
-    hist = pd.DataFrame(Y, index=H.ids, columns=years)
-    base = pd.DataFrame(yhat, index=H.ids, columns=fut)
-    rec = pd.DataFrame(f, index=H.ids, columns=fut)
     meta = pd.DataFrame({"level": H.level, "label": H.label}, index=H.ids)
     out = []
-    for kind, d in (("history", hist), ("base", base), ("forecast", rec)):
-        long = d.rename_axis("series").reset_index().melt(id_vars="series", var_name="year", value_name="wage_bill_bn")
-        out.append(long.assign(kind=kind))
+    for kind, v, cols in (("history", Y, years), ("base", yhat, fut), ("forecast", f, fut)):
+        d = pd.DataFrame(v, index=H.ids, columns=cols).rename_axis("series").reset_index()
+        out.append(d.melt(id_vars="series", var_name="year", value_name="wage_bill_bn").assign(kind=kind))
     return pd.concat(out, ignore_index=True).join(meta, on="series")
 
 
 def build(history: pd.DataFrame, fm_base: pd.DataFrame | None = None) -> dict:
-    """Everything the report and dashboard show: backtest tables, the chosen method, forecasts.
+    """Everything the report and dashboard show: backtest tables, the chosen approach, forecasts.
 
-    `fm_base`: optional foundation-model base forecasts for the same series
-    (columns model, series, origin, h, value; see `foundation.py`), reconciled the same way.
+    `fm_base`: optional foundation-model base forecasts for the same series (columns model,
+    series, origin, h, value; see `foundation.py`). They are reconciled and scored exactly like
+    the exponential-smoothing ones, and the best base forecaster and method make the forecast.
     """
     cells = cell_series(history)
     H = structure(cells.index)
-    errors = backtest(cells, H)
-    table = summary(errors)
-    by_h = wape(errors[errors["level"].isin(["national", "province", "ministry"])],
-                by=("method", "level", "h")).unstack(["level", "h"])
-    method = best_method(table)
-    fm_tables = {}
+    base_fns, errors = {"ets": ets_base}, {"ets": backtest(cells, H)}
     if fm_base is not None and len(fm_base):
         for model, d in fm_base.groupby("model"):
-            e = backtest(cells, H, base_fn=fm_base_fn(d, H))
-            fm_tables[model] = summary(e)
-    return {"cells": cells, "ids": H.ids, "levels": H.level, "labels": H.label, "errors_summary": table,
-            "by_h": by_h, "gap": coherence_gap(errors, H), "method": method,
-            "forecast": forecast(cells, method, H), "fm": fm_tables,
-            "origins": sorted(errors["origin"].unique().tolist()), "max_h": MAX_H}
+            base_fns[model] = fm_base_fn(d, H)
+            errors[model] = backtest(cells, H, base_fn=base_fns[model])
+    tables = {b: summary(e) for b, e in errors.items()}
+    base_model, method = best(tables)
+    e = errors[base_model]
+    by_h = wape(e[e["level"].isin(["national", "province", "ministry"])], by=("method", "level", "h")).unstack(["level", "h"])
+    return {"cells": cells, "tables": tables, "base_model": base_model, "method": method, "by_h": by_h,
+            "gap": coherence_gap(errors["ets"], H), "forecast": forecast(cells, method, H, base_fn=base_fns[base_model]),
+            "origins": sorted(e["origin"].unique().tolist()), "max_h": MAX_H, "wins": wins(e, method)}
+
+
+def wins(errors: pd.DataFrame, method: str, against=("base", "bottom_up", "top_down")) -> dict:
+    """Share of (origin, horizon, series) forecasts where `method` is closer to the actual than each alternative."""
+    e = errors.assign(abs_err=(errors["forecast"] - errors["actual"]).abs())
+    p = e.pivot_table(index=["origin", "h", "series"], columns="method", values="abs_err")
+    return {a: float((p[method] < p[a]).mean()) for a in against if a in p}
 
 
 def fm_base_fn(d: pd.DataFrame, H: Hierarchy):

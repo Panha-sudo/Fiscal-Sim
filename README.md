@@ -57,6 +57,7 @@ To run it on your own computer, put the same lines in `.streamlit/secrets.toml` 
 | AI reform optimiser | Searches retirement age, pension formula, accrual rate and contribution rises (optionally pay policy and hiring) for the best trade-offs between fiscal cost and pension adequacy, recommends the cheapest package meeting a replacement-rate target, and saves it as a custom scenario |
 | Retirement waves | Where and when today's staff will leave, by province, ministry or province and sector: retirements by the age rule, deaths, and early exits predicted by the M2 exit model. Units well above the national share get a High or Watch warning, a heat map shows the wave years, SHAP says why a unit differs (age mix, service, grade), and a backtest shows the accuracy |
 | Pension fund risk | Traffic lights for the chance that the NSSF-C fund runs out by 2030 to 2076 under any scenario, the likely run-out year, and an AI what-if that changes the economic assumptions, with SHAP drivers and a test on reform packages the model never saw |
+| AI forecasts | The wage bill forecast for every province and ministry, reconciled so the parts add up exactly to the national total (MinT), with a backtest against bottom-up and top-down. And the pretrained time-series models (Chronos-Bolt, Chronos-2, TimesFM 2.5) compared with M5's models on the macro series, from saved forecasts |
 | Adequacy and workforce | Replacement rates, the share of retirees on the minimum pension, and headcount |
 | Ministries and provinces | Base-year headcount, age, wage bill and M1 flags by ministry or province, with the projected wage bill under any scenario |
 | What drives results | SHAP charts for policy levers, economic uncertainty and the exit model |
@@ -85,10 +86,30 @@ In the synthetic data, each province and ministry has a random hiring trend, so 
 | Retirement wave early warning | `wave.py` | Rolls each cohort of today's staff forward (age rule, mortality, XGBoost separation hazard), sums expected exits by unit, flags units well above the national share, and explains the gap with SHAP. Backtested on 2022-2025 from the 2021 staff | Each unit's past exit rate; age rule plus each unit's past resignation rate |
 | Pension fund risk alert | `fund_risk.py` | A gradient-boosted classifier learns P(fund runs out by year) from about 900 simulated reform packages and their Monte Carlo runs; a conformal correction turns its risk curve into a run-out year range with 90% coverage; SHAP shows what moves the date. Scored on packages it never saw | Logistic regression, a year-only base rate, and a linear model with the same conformal range |
 | Scenario assistant | `assistant.py`, `knowledge.py`, `assistant_eval.py` | Gemma (Gemini API) routes a question to one of five tools by function calling and writes the answer with placeholders that are filled from the tool's results. A TF-IDF retriever over the model's own inputs (P1-P14), assumptions (A1-A16), scenarios and definitions supplies the citations. Answers with any number that is not a model value, or a citation outside the tool's sources, are replaced by a fixed template. Tested on 52 English and Khmer questions, 20 of them held out | Keyword and pattern matching (the mode without a key) |
+| Hierarchical wage bill | `hierarchy.py` | Forecasts the wage bill (at the 2026 pay scale) for 300 province x ministry cells and every sector, ministry, province and national total with damped-trend exponential smoothing, then reconciles all 341 forecasts so each total is exactly the sum of its parts (OLS, WLS and MinT-shrink). Scored on rolling origins 2018-2024, one to three years ahead | Separate forecasts, bottom-up, top-down (historical shares) |
+| Foundation-model benchmark | `foundation.py`, `.github/workflows/foundation.yml` | Chronos-Bolt, Chronos-2 and TimesFM 2.5 forecast the macro series zero-shot. Scored on M5's own test and on rolling origins 2008-2020, one to five years ahead (error, 80% range coverage, quantile loss, Diebold-Mariano). They also make base forecasts for the wage bill hierarchy | M5's naive, 8-year mean, linear trend, ARIMA, Prophet and LSTM |
 | Policy scenarios | `config.py` | Levers for S0 to S6 as in proposal Table 5 | |
 
 `simulate.py` wires M2 to M4 together. All scenarios share the same random paths, so differences between
 scenarios come from policy rather than sampling noise. `run.py` is the command-line pipeline.
+
+## Run the pretrained forecasting models (optional)
+
+Chronos-Bolt, Chronos-2 and TimesFM 2.5 need PyTorch and a download of their weights (about 1.5 GB), which the
+Streamlit app does not have. They run separately and the app scores their saved forecasts:
+
+1. `python -m fiscalsim.foundation inputs` writes the series to forecast into `benchmarks/`, from freshly generated
+   synthetic data (never from `data/`).
+2. The GitHub Actions workflow **foundation-models** runs on every change to those files or to `foundation.py`, and can
+   be started by hand from the Actions tab. It saves `benchmarks/foundation_forecasts.csv.gz` and
+   `foundation_run.json` to the `foundation-results` branch. Copy both into `main`
+   (`git checkout origin/foundation-results -- benchmarks/foundation_forecasts.csv.gz benchmarks/foundation_run.json`)
+   and rebuild with `python -m fiscalsim.run`.
+3. On your own computer instead: `pip install torch chronos-forecasting==2.3.2 timesfm==3.0.2`, then
+   `python -m fiscalsim.foundation run`.
+
+With real data, run step 3 on a machine you control with `--inputs` and `--out` pointing to a private folder, and do
+not commit the series or the forecasts: the repository is public.
 
 ## Modelling choices to review
 

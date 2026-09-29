@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 import traceback
+from importlib import metadata
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +51,9 @@ FOUNDATION = {  # name -> (Hugging Face model, parameters)
     "chronos_2": ("amazon/chronos-2", "120M"),
     "timesfm_2_5": ("google/timesfm-2.5-200m-pytorch", "200M"),
 }
+NAMES = {"naive": "Naive (last value)", "mean_8y": "8-year mean", "linear_trend": "Linear trend", "arima": "ARIMA",
+         "prophet": "Prophet", "lstm": "LSTM", "chronos_bolt": "Chronos-Bolt", "chronos_2": "Chronos-2",
+         "timesfm_2_5": "TimesFM 2.5", "ets": "Exponential smoothing"}
 QUANTILES = (0.1, 0.5, 0.9)
 ROLL_ORIGINS, ROLL_H = range(2008, 2021), 5
 FUTURE_H = 10
@@ -158,10 +162,10 @@ def run(inputs: Path = BENCH, out: Path = BENCH, models=tuple(FOUNDATION)) -> di
             traceback.print_exc()
             info["models"][name] = {"repo": repo, "parameters": size, "status": f"failed: {type(e).__name__}: {e}"[:500]}
         print(name, info["models"][name], flush=True)
-    for pkg in ("torch", "chronos", "timesfm", "transformers"):
+    for pkg in ("torch", "chronos-forecasting", "timesfm", "transformers"):
         try:
-            info[pkg] = __import__(pkg).__version__
-        except Exception:
+            info[pkg] = metadata.version(pkg)
+        except metadata.PackageNotFoundError:
             info[pkg] = None
     out.mkdir(parents=True, exist_ok=True)
     if frames:

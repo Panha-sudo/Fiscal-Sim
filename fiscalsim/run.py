@@ -15,7 +15,9 @@ import pandas as pd
 from . import config as C
 from . import m6_explain as m6
 from . import breakdown, report
+from . import foundation as FD
 from . import fund_risk as R
+from . import hierarchy as HI
 from . import optimize as O
 from . import wave as W
 from . import simulate as S
@@ -106,7 +108,25 @@ def main(argv=None):
     risk = R.build(ctx)
     risk["scenarios"] = pd.DataFrame({k: R.simulated_curve(r) for k, r in results.items()}).T
 
+    log("Wage bill by province and ministry: hierarchical forecast and reconciliation backtest")
+    fm_saved, fm_info = FD.load_saved()
+    wage_series = HI.all_series(HI.cell_series(ctx.data["history"]))
+    fm_ok = fm_saved is not None and FD.inputs_match(ctx.data["macro"], wage_series)
+    if fm_saved is not None and not fm_ok:
+        log("  saved foundation-model forecasts are for other series (benchmarks/): scoring the baselines only")
+    hier = HI.build(ctx.data["history"], FD.wage_fm_base(fm_saved) if fm_ok else None)
+    log("Foundation models against M5's forecasters (same backtest as M5, and rolling origins)")
+    fm = FD.score_macro(ctx.data["macro"], fm_saved if fm_ok else None)
+    fm["info"] = fm_info if fm_ok else {}
+
     log("Writing outputs")
+    for base_model, tab in hier["tables"].items():
+        tab.to_csv(out / f"hierarchy_backtest_{base_model}.csv")
+    hier["forecast"].to_csv(out / "hierarchy_forecast.csv", index=False)
+    fm["same_as_m5"].to_csv(out / "foundation_same_as_m5.csv", index=False)
+    fm["rolling"].to_csv(out / "foundation_rolling.csv", index=False)
+    fm["overall"].to_csv(out / "foundation_overall.csv")
+    fm["future"].to_csv(out / "foundation_future.csv", index=False)
     wave_bt["table"].to_csv(out / "wave_backtest.csv")
     for level, tab in wave_out["tables"].items():
         tab.to_csv(out / f"wave_by_{level}.csv")
@@ -144,7 +164,7 @@ def main(argv=None):
     report.chart_fans(results, "total_cost_gdp", charts / "total_cost_gdp_fans.png")
     report.chart_bar(imp_exit.head(10), "M2 exit model: mean |SHAP| (log-odds)", charts / "shap_exit_model.png")
     report.chart_bar(imp_pol, "Total cost 2046: mean |SHAP| (pp of GDP)", charts / "shap_policy.png")
-    report.markdown(ctx, results, table, shap_out, out, args.runs, opt, wave_out, risk)
+    report.markdown(ctx, results, table, shap_out, out, args.runs, opt, wave_out, risk, hier, fm)
 
     with open(out / "dashboard_bundle.pkl", "wb") as f:
         pickle.dump({"table": table, "fans": fans, "workforce": wf, "adequacy": ad, "shap": shap_out,
@@ -154,7 +174,8 @@ def main(argv=None):
                      "m2": ctx.m2_backtest["table"], "km": ctx.km, "m5": ctx.m5_backtest,
                      "m5_choice": ctx.m5_choice, "macro": ctx.data["macro"], "central": ctx.central,
                      "engine": engine_bundle(ctx), "runs": args.runs, "optimiser": opt,
-                     "wave_cells": wave_cells, "wave_backtest": wave_bt, "fund_risk": risk}, f)
+                     "wave_cells": wave_cells, "wave_backtest": wave_bt, "fund_risk": risk,
+                     "hierarchy": hier, "foundation": fm}, f)
     log(f"Done. Report: {out / 'report.md'}")
 
 

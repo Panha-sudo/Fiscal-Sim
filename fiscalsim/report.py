@@ -104,7 +104,8 @@ def _fmt(x, d=2):
 
 
 def markdown(ctx, results, table, shap_out, out: Path, runs: int, opt: dict | None = None,
-             wave: dict | None = None, risk: dict | None = None) -> str:
+             wave: dict | None = None, risk: dict | None = None, hier: dict | None = None,
+             fm: dict | None = None) -> str:
     ev = ctx.m1["evaluation"]
     bt2 = ctx.m2_backtest["table"]
     bt5 = ctx.m5_backtest
@@ -223,6 +224,10 @@ def markdown(ctx, results, table, shap_out, out: Path, runs: int, opt: dict | No
         lines += wave_markdown(wave)
     if risk:
         lines += risk_markdown(risk)
+    if fm:
+        lines += foundation_markdown(fm)
+    if hier:
+        lines += hierarchy_markdown(hier)
     lines += [
         "## Caveats",
         "",
@@ -304,3 +309,59 @@ def risk_markdown(risk: dict) -> list[str]:
             ev["year_range"].to_markdown(), "",
             "What moves the run-out year (mean |SHAP|, years):", "",
             risk["shap"].round(2).rename("years").to_frame().to_markdown(), ""]
+
+
+def foundation_markdown(fm: dict) -> list[str]:
+    from .foundation import FOUNDATION, NAMES, ROLL_H, ROLL_ORIGINS
+    info = fm.get("info") or {}
+    ran = [m for m in fm["models"] if m in FOUNDATION]
+    lines = ["## Time-series foundation models against M5's forecasters", "",
+             "Pretrained models forecast zero-shot from the same history the M5 models are trained on."]
+    if ran:
+        lines.append("Models: " + ", ".join(f"{NAMES[m]} ({FOUNDATION[m][0]}, {FOUNDATION[m][1]} parameters)" for m in ran)
+                     + f". Forecasts made {info.get('date', '')}" + (f" in {info['run']}" if info.get("run") else "") + ".")
+    else:
+        lines.append("No saved foundation-model forecasts for these series yet (run the foundation-models workflow): "
+                     "baselines only.")
+    same = fm["same_as_m5"].assign(model=lambda d: d["model"].map(NAMES))
+    roll = fm["rolling"].assign(model=lambda d: d["model"].map(NAMES))
+    ov = fm["overall"].rename(index=NAMES)
+    lines += ["", "### Same test as M5: train 1995-2017, forecast 2018-2025 in one run (MAPE of the level, %)", "",
+              same.pivot(index="model", columns="target", values="MAPE_%").reindex(ov.index).to_markdown(), "",
+              f"### Rolling origins: forecasts 1 to {ROLL_H} years ahead from each year {ROLL_ORIGINS[0]}-{ROLL_ORIGINS[-1]}", "",
+              "Error in percentage points of the annual rate. Relative error: model error / naive error, geometric "
+              "mean over the three series (below 1 beats the naive forecast). Coverage: share of actual values inside "
+              "the model's 80% range. Quantile loss: average pinball loss at the 10th, 50th and 90th percentiles, "
+              "times two (close to the CRPS), in percentage points.", "",
+              ov.round(3).to_markdown(), "",
+              roll.pivot(index="model", columns="target", values="MAE_pp").reindex(ov.index).round(3).to_markdown(), ""]
+    dm = roll.dropna(subset=["p_vs_arima"]) if "p_vs_arima" in roll else roll.iloc[:0]
+    if len(dm):
+        lines += ["Diebold-Mariano tests on each origin's average absolute error (Harvey-Leybourne-Newbold, "
+                  f"{ROLL_H - 1} lags; negative = the foundation model has the smaller error):", "",
+                  dm[["target", "model", "DM_vs_arima", "p_vs_arima", "DM_vs_lstm", "p_vs_lstm"]].round(3)
+                  .to_markdown(index=False), ""]
+    return lines
+
+
+def hierarchy_markdown(h: dict) -> list[str]:
+    from .foundation import NAMES
+    t = h["tables"]["ets"]
+    lines = ["## Wage bill by province and ministry: hierarchical forecasting", "",
+             "Annual wage bill at the 2026 pay scale for 300 province x ministry cells and every total above them "
+             "(3 sectors, 12 ministries, 25 provinces, national), forecast with damped-trend exponential smoothing "
+             f"and reconciled so every total equals the sum of its parts. Rolling origins {h['origins'][0]}-"
+             f"{h['origins'][-1]}, 1 to {h['max_h']} years ahead. WAPE = sum of absolute errors / sum of actual values, %.", "",
+             t.round(3).to_markdown(), "",
+             f"Forecast separately, the provinces add up to a total that differs from the national forecast by "
+             f"{h['gap']['province']:.2f}% on average (cells: {h['gap']['cell']:.2f}%). Reconciled forecasts add up exactly.",
+             ""]
+    others = {b: v for b, v in h["tables"].items() if b != "ets"}
+    if others:
+        comp = pd.DataFrame({NAMES.get(b, b): v["average"] for b, v in h["tables"].items()})
+        lines += ["Average WAPE over the five levels, by base forecaster (columns) and method (rows):", "",
+                  comp.round(3).to_markdown(), ""]
+    lines += [f"Chosen: {NAMES.get(h['base_model'], h['base_model'])} base forecasts with {h['method']} reconciliation. "
+              "It is closer to the actual value than " + ", ".join(f"{k} in {v:.0%}" for k, v in h["wins"].items())
+              + " of all held-out forecasts.", ""]
+    return lines
