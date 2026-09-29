@@ -32,11 +32,27 @@ The committed `outputs/dashboard_bundle.pkl` holds the published 10,000-run resu
 
 Uploaded files stay in the viewer's app session and are never written to disk or to the repository.
 
+### Turn on the AI scenario assistant (optional)
+
+The **Ask the model** tab answers plain Khmer or English questions. Without a key it runs in a simple keyword mode. To use Gemma:
+
+1. Go to https://aistudio.google.com/apikey, sign in with a Google account and click **Create API key**. The free tier is enough.
+2. In Streamlit Community Cloud, open the app's **Settings > Secrets** and paste:
+   ```toml
+   GEMINI_API_KEY = "your-key-here"
+   # optional, default gemma-4-31b-it
+   GEMMA_MODEL = "gemma-4-26b-a4b-it"
+   ```
+3. Save. The app restarts and the tab says it is in AI mode.
+
+To run it on your own computer, put the same lines in `.streamlit/secrets.toml` (ignored by git), or set `GEMINI_API_KEY` as an environment variable. Never commit the key. With the key set, `python -m fiscalsim.assistant_eval` tests Gemma and the keyword baseline on the same questions and writes `outputs/assistant_eval_*.csv`. The app has the same test at the bottom of the tab.
+
 ## Dashboard features
 
 | Tab | What it does |
 |---|---|
 | Compare scenarios | Fan charts with 90% bands for S0 to S6 and any saved custom scenarios, plus the comparison table at 2036, 2046 or 2076 |
+| Ask the model | Plain Khmer or English questions such as "What if the retirement age is 62?". Gemma picks the tool and settings (function calling), the simulator, optimiser or wave model computes the answer, and Gemma writes it up citing the assumptions behind it (IDs match thesis Appendices B and C). Every number is checked against the model's results before it is shown. Works in keyword mode without an API key |
 | Build a scenario | Set every policy lever, see the result live against S0, and save up to three custom scenarios to compare and export |
 | AI reform optimiser | Searches retirement age, pension formula, accrual rate and contribution rises (optionally pay policy and hiring) for the best trade-offs between fiscal cost and pension adequacy, recommends the cheapest package meeting a replacement-rate target, and saves it as a custom scenario |
 | Retirement waves | Where and when today's staff will leave, by province, ministry or province and sector: retirements by the age rule, deaths, and early exits predicted by the M2 exit model. Units well above the national share get a High or Watch warning, a heat map shows the wave years, SHAP says why a unit differs (age mix, service, grade), and a backtest shows the accuracy |
@@ -68,6 +84,7 @@ In the synthetic data, each province and ministry has a random hiring trend, so 
 | Reform optimiser | `optimize.py` | Surrogate-assisted multi-objective search: Gaussian-process surrogates of the simulator pick which reform packages to score next, and the Pareto front of cost against adequacy comes from simulator runs only. `python -m fiscalsim.run --grid-check` scores every package to check the search against brute force | Scoring every package in the grid |
 | Retirement wave early warning | `wave.py` | Rolls each cohort of today's staff forward (age rule, mortality, XGBoost separation hazard), sums expected exits by unit, flags units well above the national share, and explains the gap with SHAP. Backtested on 2022-2025 from the 2021 staff | Each unit's past exit rate; age rule plus each unit's past resignation rate |
 | Pension fund risk alert | `fund_risk.py` | A gradient-boosted classifier learns P(fund runs out by year) from about 900 simulated reform packages and their Monte Carlo runs; a conformal correction turns its risk curve into a run-out year range with 90% coverage; SHAP shows what moves the date. Scored on packages it never saw | Logistic regression, a year-only base rate, and a linear model with the same conformal range |
+| Scenario assistant | `assistant.py`, `knowledge.py`, `assistant_eval.py` | Gemma (Gemini API) routes a question to one of five tools by function calling and writes the answer with placeholders that are filled from the tool's results. A TF-IDF retriever over the model's own inputs (P1-P14), assumptions (A1-A16), scenarios and definitions supplies the citations. Answers with any number that is not a model value, or a citation outside the tool's sources, are replaced by a fixed template. Tested on 52 English and Khmer questions, 20 of them held out | Keyword and pattern matching (the mode without a key) |
 | Policy scenarios | `config.py` | Levers for S0 to S6 as in proposal Table 5 | |
 
 `simulate.py` wires M2 to M4 together. All scenarios share the same random paths, so differences between

@@ -34,7 +34,10 @@ def drop_stale_package(pkg: str = "fiscalsim") -> None:
 
 drop_stale_package()
 
+from fiscalsim import assistant as A
+from fiscalsim import assistant_eval as AE
 from fiscalsim import breakdown, export, upload
+from fiscalsim import knowledge as K
 from fiscalsim import config as C
 from fiscalsim import fund_risk as R
 from fiscalsim import m1_data_quality as m1
@@ -173,7 +176,7 @@ if D["source"] == "synthetic":
 else:
     st.caption(t("caption_uploaded", lang, n=D["n_records"], flagged=D["n_flagged"], runs=D["runs"]))
 
-TAB_KEYS = ("tab_compare", "tab_build", "tab_opt", "tab_wave", "tab_risk", "tab_adequacy", "tab_units", "tab_drivers", "tab_checks", "tab_data", "tab_export")
+TAB_KEYS = ("tab_compare", "tab_ask", "tab_build", "tab_opt", "tab_wave", "tab_risk", "tab_adequacy", "tab_units", "tab_drivers", "tab_checks", "tab_data", "tab_export")
 TAB = dict(zip(TAB_KEYS, st.tabs([t(k, lang) for k in TAB_KEYS])))
 
 # ---------- compare ----------
@@ -191,6 +194,104 @@ with TAB["tab_compare"]:
     st.subheader(t("all_scenarios_in", lang, h=h))
     st.dataframe(tb.style.format({c: "{:.2f}" for c in v[:5]} | {v[5]: "{:.0%}", v[6]: "{:.0f}", v[7]: "{:,.0f}"},
                                  na_rep="–"), width="stretch")
+
+# ---------- ask the model (scenario assistant) ----------
+ASK_EXAMPLES = {
+    "en": ["What if the retirement age is raised to 62?", "Compare the status quo with the combined reform.",
+           "What is the cheapest reform that keeps an average replacement rate of 58%?",
+           "Which provinces will lose the most staff over the next 10 years?", "What is the current pension formula?"],
+    "km": ["បើដំឡើងអាយុចូលនិវត្តន៍ដល់ ៦២ ឆ្នាំ តើមានអ្វីកើតឡើង?", "ប្រៀបធៀបស្ថានភាពបច្ចុប្បន្ន (S0) និងកំណែទម្រង់រួម (S5)",
+           "តើកំណែទម្រង់ណាដែលថោកបំផុត ដែលរក្សាអត្រាជំនួសមធ្យមបាន ៥៨%?",
+           "ខេត្តណាខ្លះនឹងបាត់បង់មន្ត្រីច្រើនជាងគេ ក្នុងរយៈពេល ១០ ឆ្នាំខាងមុខ?", "តើរូបមន្តសោធនបច្ចុប្បន្នគឺយ៉ាងដូចម្តេច?"],
+}
+
+
+def ask_env():
+    """Assistant environment for the data currently loaded (synthetic or uploaded)."""
+    envs = ss.setdefault("ask_env", {})
+    if D["source"] not in envs:
+        envs[D["source"]] = A.Env(ctx=D["ctx"], table=D["frames"]["table"], runs=D["runs"],
+                                  synthetic=D["source"] == "synthetic", cells=D["cells"])
+    env = envs[D["source"]]
+    opt = dict(B.get("optimiser") or {}) if D["source"] == "synthetic" else {}
+    opt.update({k[1]: v for k, v in ss.get("opt", {}).items() if k[0] == D["source"]})
+    env.optimiser = opt
+    return env
+
+
+def ask_client():
+    def secret(name):
+        return st.secrets.get(name)
+    return A.client_from_settings(secret)
+
+
+def show_answer(ans):
+    st.markdown(f"**{ans.question}**")
+    st.write(ans.text)
+    how = t("ask_mode_ai" if ans.mode == "gemma" else "ask_mode_rules", lang)
+    st.caption(f"{t('ask_understood', lang)}: {A.describe(ans.result, lang, cite=False) or '–'} · {how}")
+    if ans.error:
+        st.caption(t("ask_ai_error", lang, why=ans.error))
+    if ans.fallback:
+        st.caption(t("ask_fallback", lang, why=ans.fallback))
+    if ans.result.facts or ans.result.sources:
+        with st.expander(t("ask_details", lang)):
+            facts = {k: f for k, f in ans.result.facts.items() if f.kind != "text" or f.en not in ("Result",)}
+            if facts:
+                st.dataframe(pd.DataFrame({t("ask_col_item", lang): [f.km if lang == "km" and f.km else f.en for f in facts.values()],
+                                           t("ask_col_value", lang): [A.fmt(f, lang) for f in facts.values()]}),
+                             hide_index=True, width="stretch")
+            if ans.result.sources:
+                st.markdown(f"**{t('ask_sources', lang)}**")
+                for i in ans.result.sources:
+                    e = K.BY_ID[i]
+                    mark = "**" if i in ans.cited else ""
+                    st.markdown(f"- {mark}[{i}] {e['title']}{mark}: {e['text']} ({t('ask_set_in', lang)} `{e['where']}`)")
+
+
+with TAB["tab_ask"]:
+    st.write(t("ask_intro", lang))
+    client = ask_client()
+    if client is not None:
+        st.caption(t("ask_ai_mode", lang, model=client.model) + " " + t("ask_privacy", lang))
+    else:
+        st.info(t("ask_no_key", lang))
+    st.caption(t("ask_examples", lang))
+    picked = None
+    for i, q in enumerate(ASK_EXAMPLES[lang]):
+        if st.button(q, key=f"ask_ex_{lang}_{i}", type="tertiary"):
+            picked = q
+    with st.form("ask_form"):
+        typed = st.text_input(t("ask_label", lang), key="ask_q")
+        asked = st.form_submit_button(t("ask_button", lang), type="primary")
+    question = picked or (typed.strip() if asked else "")
+    log = ss.setdefault("ask_log", [])
+    if question:
+        with st.spinner("..."):
+            log.insert(0, A.answer(question, ask_env(), client))
+        del log[5:]
+    for k, ans in enumerate(log):
+        if k:
+            st.divider()
+        show_answer(ans)
+    if log and st.button(t("ask_clear", lang)):
+        ss["ask_log"] = []
+        st.rerun()
+    n_q = sum(len(v) for v in AE.SETS.values())
+    with st.expander(t("ask_test", lang)):
+        st.write(t("ask_test_intro", lang, n=n_q, calls=2 * n_q))
+        if st.button(t("ask_test_run", lang), key="ask_test_run"):
+            bar = st.progress(0.0, text=t("ask_test_running", lang))
+            df, summ = AE.evaluate(ask_env(), client, pause=4.0,
+                                   progress=lambda f: bar.progress(min(f, 1.0), text=t("ask_test_running", lang)))
+            mode = f"Gemma ({client.model})" if client is not None else "keywords (no AI)"
+            ss["ask_test"] = (AE.summary_table({mode: summ}), df)
+        if "ask_test" in ss:
+            summ_df, df = ss["ask_test"]
+            st.dataframe(summ_df.style.format({k: "{:.0%}" for k in (*AE.METRICS, "ai_text_used")}, na_rep="–"),
+                         hide_index=True, width="stretch")
+            st.download_button(t("ask_test_download", lang), df.to_csv(index=False).encode("utf-8-sig"),
+                               "assistant_test.csv", "text/csv")
 
 # ---------- build ----------
 with TAB["tab_build"]:

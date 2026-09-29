@@ -11,3 +11,7 @@ outputs/*
 *.xlsx
 *.xls
 uploads/
+# API keys for the scenario assistant
+.streamlit/secrets.toml
+secrets.toml
+.env
