@@ -140,7 +140,7 @@ def basic_salary(framework, service):
 
 
 def hrmis_extract(rng, stock: pd.DataFrame):
-    """Base-year staff records, with duplicates, ghost records and salary outliers injected."""
+    """Base-year staff records, with duplicates, unconfirmed-identity records and salary outliers injected."""
     n = len(stock)
     df = stock.copy()
     df["national_id"] = rng.choice(10**9, n, replace=False) + 10**9
@@ -166,7 +166,7 @@ def hrmis_extract(rng, stock: pd.DataFrame):
     df["bank_account"] = rng.choice(10**11, n, replace=False)
     df["anomaly"] = "none"
 
-    k_dup, k_ghost, k_out = int(n * 0.010), int(n * 0.015), int(n * 0.005)
+    k_dup, k_unconf, k_out = int(n * 0.010), int(n * 0.015), int(n * 0.005)
     dup = df.sample(k_dup, random_state=1).copy()
     dup["person_id"] = np.arange(df.person_id.max() + 1, df.person_id.max() + 1 + k_dup)
     dup["province"] = rng.choice(PROVINCES, k_dup)  # re-registered in another province
@@ -175,19 +175,19 @@ def hrmis_extract(rng, stock: pd.DataFrame):
     dup["bank_account"] = rng.choice(10**11, k_dup)
     dup["anomaly"] = "duplicate"
 
-    ghost = df.sample(k_ghost, random_state=2).copy()
-    ghost["person_id"] = np.arange(dup.person_id.max() + 1, dup.person_id.max() + 1 + k_ghost)
-    ghost["national_id"] = rng.choice(10**9, k_ghost) + 3 * 10**9
-    ghost["full_name"] = [f"{a} {b}" for a, b in zip(rng.choice(FAMILY, k_ghost), rng.choice(GIVEN, k_ghost))]
-    ghost["attendance_days_q"] = rng.integers(0, 8, k_ghost)
-    older = rng.random(k_ghost) < 0.5  # half are past retirement age and still paid
-    ghost.loc[older, "age"] = rng.integers(56, 72, older.sum())
-    ghost["birth_year"] = C.BASE_YEAR - ghost["age"]
-    shared = rng.random(k_ghost) < 0.4  # paid into another employee's account
-    ghost.loc[shared, "bank_account"] = df["bank_account"].sample(shared.sum(), random_state=3).to_numpy()
-    ghost["anomaly"] = "ghost"
+    unconf = df.sample(k_unconf, random_state=2).copy()
+    unconf["person_id"] = np.arange(dup.person_id.max() + 1, dup.person_id.max() + 1 + k_unconf)
+    unconf["national_id"] = rng.choice(10**9, k_unconf) + 3 * 10**9
+    unconf["full_name"] = [f"{a} {b}" for a, b in zip(rng.choice(FAMILY, k_unconf), rng.choice(GIVEN, k_unconf))]
+    unconf["attendance_days_q"] = rng.integers(0, 8, k_unconf)
+    older = rng.random(k_unconf) < 0.5  # half are past retirement age
+    unconf.loc[older, "age"] = rng.integers(56, 72, older.sum())
+    unconf["birth_year"] = C.BASE_YEAR - unconf["age"]
+    shared = rng.random(k_unconf) < 0.4  # shares a bank account with another record
+    unconf.loc[shared, "bank_account"] = df["bank_account"].sample(shared.sum(), random_state=3).to_numpy()
+    unconf["anomaly"] = "identity_unconfirmed"
 
-    df = pd.concat([df, dup, ghost], ignore_index=True)
+    df = pd.concat([df, dup, unconf], ignore_index=True)
     out_idx = df[df.anomaly == "none"].sample(k_out, random_state=4).index
     df.loc[out_idx, "basic_salary"] *= rng.uniform(2.5, 8, k_out)
     df.loc[out_idx, "anomaly"] = "salary_outlier"

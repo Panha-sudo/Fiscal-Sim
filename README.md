@@ -53,8 +53,8 @@ Ministry and province projections give each unit its base-year share of its sect
 
 | Module | File | What it does | Baseline it is compared with |
 |---|---|---|---|
-| Inputs | `synthetic.py` | A 2012-2025 staff panel, a 2026 HRMIS extract with injected duplicates, ghost records and off-scale salaries, the NSSF-C pensioner register, 1995-2025 macro series and a mortality table | |
-| M1 Data quality | `m1_data_quality.py` | Record matching on name, birth date and national ID, plus Isolation Forest. Flagged records are removed before the base year is built | Rule-based checks only |
+| Inputs | `synthetic.py` | A 2012-2025 staff panel, a 2026 HRMIS extract with injected duplicates, records with unconfirmed identity or attendance, and off-scale salaries, the NSSF-C pensioner register, 1995-2025 macro series and a mortality table | |
+| M1 Data quality | `m1_data_quality.py` | Record matching on name, birth date and national ID, plus Isolation Forest. Flagged records are set aside for verification before the base year is built. A flag is a prompt to check the record, not a finding of wrongdoing | Rule-based checks only |
 | M2 Workforce | `m2_workforce.py` | Kaplan-Meier curves, a discrete-time logit hazard and an XGBoost exit model, with a Markov promotion matrix. It projects headcount by sector, framework, age and service | Cohort-ratio method |
 | M3 Salary engine | `m3_salary.py` | Pay-scale rules (framework entry pay x service steps x salary index, plus allowances) under fixed, inflation-indexed or targeted raises | Fixed-growth assumption (S0) |
 | M4 Pension and fiscal | `m4_pension.py` | A cohort actuarial model covering benefits, CPI or pay indexation, mortality, contributions, the fund balance, depletion and government top-up, across 10,000 paths | Deterministic central path (run 0) |

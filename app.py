@@ -19,7 +19,7 @@ from fiscalsim import breakdown, export, upload
 from fiscalsim import config as C
 from fiscalsim import m1_data_quality as m1
 from fiscalsim import simulate as S
-from fiscalsim.i18n import LANGS, metric_label, scenario_name, t
+from fiscalsim.i18n import LANGS, check_label, metric_label, scenario_name, t
 from fiscalsim.report import LABELS, PALETTE
 
 st.set_page_config(page_title="Cambodia civil service fiscal simulator", layout="wide")
@@ -285,12 +285,13 @@ with tabs[4]:
 # ---------- checks ----------
 with tabs[5]:
     st.subheader(t("checks_m1", lang))
+    st.info(t("m1_note", lang))
     if D["source"] == "synthetic":
         st.dataframe(B["m1"], width="stretch")
-        st.dataframe(B["m1_types"], width="stretch")
+        st.dataframe(B["m1_types"].rename(index=lambda k: check_label(k, lang)), width="stretch")
     else:
         st.caption("Precision and recall need known answers, which only the synthetic data has. "
-                   "The Your data tab shows what M1 flagged in your file and why.")
+                   "The Your data tab shows which records M1 asks you to verify and why.")
     st.subheader(t("checks_m2", lang))
     st.dataframe(B["m2"], width="stretch")
     km = B["km"]
@@ -341,10 +342,11 @@ with tabs[6]:
         recs = D["m1"]["records"]
         flagged = recs[recs["flag"]]
         reasons = pd.Series({
-            "duplicate (name/birth date or national ID)": int(m1.record_matching(recs).sum()),
-            "Isolation Forest anomaly": int(recs["iforest_flag"].sum()),
+            "duplicate_match": int(m1.record_matching(recs).sum()),
+            "iforest": int(recs["iforest_flag"].sum()),
             **{k: int(v) for k, v in m1.rule_flags(recs)[["past_retirement", "no_attendance", "off_scale_salary"]].sum().items()},
-        }, name="records")
+        }, name="records").rename(index=lambda k: check_label(k, lang))
+        st.info(t("m1_note", lang))
         st.subheader(t("data_flag_reasons", lang))
         st.dataframe(reasons, width="stretch")
         st.subheader(t("data_flagged_rows", lang))
@@ -363,7 +365,7 @@ with tabs[7]:
               if D["source"] == "synthetic" else f"Uploaded payroll file {D['source']}")
     extra = {}
     if D["m1"] is not None:
-        extra["M1 flagged records"] = D["m1"]["records"][D["m1"]["records"]["flag"]].drop(columns=["bank_account"], errors="ignore")
+        extra["M1 records to verify"] = D["m1"]["records"][D["m1"]["records"]["flag"]].drop(columns=["bank_account"], errors="ignore")
     xlsx = export.workbook(F, scen, D["runs"], source, breakdown.by(base, "ministry"), breakdown.by(base, "province"), extra)
     st.download_button(t("export_xlsx", lang), xlsx, file_name="fiscal_simulation_results.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
