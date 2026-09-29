@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+# Generated inputs and results. Rebuild with: python -m fiscalsim.run --regenerate
+data/
+outputs/*
+# The dashboard bundle is committed so the deployed app starts instantly with the published results.
+!outputs/dashboard_bundle.pkl
+# Never commit real payroll or pension files
+*.xlsx
+*.xls
+uploads/
