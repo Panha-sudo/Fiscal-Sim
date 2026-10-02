@@ -33,7 +33,13 @@ from .synthetic import mortality_table
 
 AGES = np.arange(18, 66)
 SERVICE = np.arange(0, 48)
-TRAIN_END = 2021  # backtest: train <= 2021, test 2022-2025
+TRAIN_END = 2021  # backtest: train <= 2021, test 2022-2025 (the last four years of the synthetic panel)
+TEST_YEARS = 4
+
+
+def backtest_origin(history: pd.DataFrame) -> int:
+    """Last training year of the backtests: the final TEST_YEARS years of the panel are held out."""
+    return int(history["year"].max()) - TEST_YEARS
 
 
 # ---------- feature engineering ----------
@@ -157,14 +163,15 @@ def diebold_mariano(e1, e2, h: int = 1):
     return float(stat), float(2 * (1 - stats.t.cdf(abs(stat), df=n - 1)))
 
 
-def backtest(history: pd.DataFrame, sample_frac: float = 0.5, seed: int = C.SEED) -> dict:
+def backtest(history: pd.DataFrame, sample_frac: float = 0.5, seed: int = C.SEED, origin: int | None = None) -> dict:
+    origin = backtest_origin(history) if origin is None else origin
     data = separation_sample(history)
-    train = data[data["year"] <= TRAIN_END].sample(frac=sample_frac, random_state=seed)
-    test = data[data["year"] > TRAIN_END].copy()
+    train = data[data["year"] <= origin].sample(frac=sample_frac, random_state=seed)
+    test = data[data["year"] > origin].copy()
     models = {"cohort_ratio": CohortRatio(train), "logit_hazard": fit_logit(train), "xgboost": fit_xgb(train)}
 
     # retirements and deaths in the test years come from rules both approaches share
-    other_exits = history[(history["year"] > TRAIN_END) & history["exit_type"].isin(["retirement", "death"])]
+    other_exits = history[(history["year"] > origin) & history["exit_type"].isin(["retirement", "death"])]
     other = other_exits.groupby(["year", "sector"]).size()
 
     rows, auc, err = [], {}, {}
@@ -185,7 +192,7 @@ def backtest(history: pd.DataFrame, sample_frac: float = 0.5, seed: int = C.SEED
         table.loc[name, "DM_vs_baseline"] = round(dm, 2)
         table.loc[name, "DM_p_value"] = round(p, 4)
     by_cell = test.groupby(["year", "sector"])[["y", *models]].sum().rename(columns={"y": "actual"})
-    return {"table": table, "by_year_sector": by_cell.round(1)}
+    return {"table": table, "by_year_sector": by_cell.round(1), "origin": origin}
 
 
 # ---------- projection ----------

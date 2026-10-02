@@ -22,7 +22,12 @@ from . import config as C
 from .m2_workforce import diebold_mariano
 
 TARGETS = ("real_growth", "inflation", "revenue_share_gdp")
-TRAIN_END = 2017
+TRAIN_END = 2017  # 1995-2025 synthetic series: the last eight years are held out
+TEST_YEARS = 8
+
+
+def train_end(macro: pd.DataFrame) -> int:
+    return int(macro["year"].max()) - TEST_YEARS
 
 
 # ---------- forecasters: fit(y: pd.Series indexed by year) -> forecast(h) ----------
@@ -123,10 +128,11 @@ def _to_level(target, rates):
 
 
 def backtest(macro: pd.DataFrame) -> pd.DataFrame:
+    end = train_end(macro)
     rows = []
     for target in TARGETS:
         y = macro.set_index("year")[target]
-        train, test = y[y.index <= TRAIN_END], y[y.index > TRAIN_END]
+        train, test = y[y.index <= end], y[y.index > end]
         actual = _to_level(target, test)
         preds = {}
         for name, fn in MODELS.items():

@@ -78,6 +78,8 @@ def test_foundation_pipeline_with_a_stand_in_model(tmp_path, monkeypatch):
         assert roll.loc[(target, "chronos_2"), "MAE_pp"] == pytest.approx(roll.loc[(target, "naive"), "MAE_pp"])
     assert r["overall"].loc["naive", "rel_MAE_vs_naive"] == pytest.approx(1)
     assert 0 <= r["overall"].loc["arima", "coverage_80_pct"] <= 100
+    from fiscalsim import report  # the report also works without the LSTM and Prophet baselines
+    assert any("Diebold-Mariano" in line for line in report.foundation_markdown(r))
     same = r["same_as_m5"].set_index(["target", "model"])["MAPE_%"]
     ref = m5.backtest(macro).set_index(["target", "model"])["MAPE_%"]
     for key in [k for k in same.index if k in ref.index]:  # same test, same numbers as M5's own backtest

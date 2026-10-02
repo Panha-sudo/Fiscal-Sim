@@ -6,7 +6,8 @@ these do not add up (the provinces' forecasts sum to a different national total 
 national forecast). Reconciliation adjusts all of them together so that every total is
 exactly the sum of its parts, using what each forecast tells about the others.
 
-Methods compared on held-out years (rolling origins 2018-2024, one to three years ahead):
+Methods compared on held-out years (rolling origins 2018-2024 for the 2012-2025 synthetic panel,
+one to three years ahead):
   base         each series forecast on its own (not coherent; for reference)
   bottom_up    forecast the cells, add them up
   top_down     forecast the national total, split it by each cell's average historical share
@@ -35,6 +36,11 @@ LEVELS = ("national", "sector", "ministry", "province", "cell")
 METHODS = ("base", "bottom_up", "top_down", "ols", "wls_struct", "wls_var", "mint_shrink")
 COHERENT = METHODS[1:]
 FIRST_ORIGIN, MAX_H, FUTURE_H = 2018, 3, 5
+
+
+def first_origin(years) -> int:
+    """Seven rolling origins (2018 for 2012-2025), each with at least five training years."""
+    return max(int(years[0]) + 4, int(years[-1]) - 7)
 
 
 # ---------- series and structure ----------
@@ -99,6 +105,29 @@ def ets_base(Y: np.ndarray, h: int, origin: int | None = None) -> tuple[np.ndarr
     return np.array([f for f, _ in out]), np.array([r for _, r in out])
 
 
+def ets_grid_base(Y: np.ndarray, h: int, origin: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """The same damped-trend smoothing for every series at once, with its three parameters picked from a
+    grid by in-sample squared error instead of numerical optimisation. Used when the dashboard reruns the
+    forecast on an uploaded history: it takes a second where `ets_base` takes minutes."""
+    Y = np.asarray(Y, float)
+    a, b, p = np.meshgrid(np.linspace(0.05, 1, 20), np.linspace(0, 1, 11), (0.8, 0.85, 0.9, 0.95, 0.98), indexing="ij")
+    a, b, p = (v.reshape(-1, 1) for v in (a, b, p))  # [grid, 1], broadcast over series
+    level = np.broadcast_to(Y[:, 0], (len(a), len(Y))).copy()
+    trend = np.broadcast_to(Y[:, 1] - Y[:, 0] if Y.shape[1] > 1 else 0 * Y[:, 0], level.shape).copy()
+    res = np.zeros((len(a), *Y.shape))
+    for t in range(1, Y.shape[1]):
+        fit = level + p * trend
+        res[:, :, t] = Y[:, t] - fit
+        new = a * Y[:, t] + (1 - a) * fit
+        trend = b * (new - level) + (1 - b) * p * trend
+        level = new
+    best = (res ** 2).sum(axis=2).argmin(axis=0)  # per series
+    i = np.arange(len(Y))
+    damp = np.cumsum(p[best] ** np.arange(1, h + 1), axis=1)  # phi + ... + phi^k
+    f = level[best, i][:, None] + damp * trend[best, i][:, None]
+    return np.maximum(f, 0), res[best, i]
+
+
 # ---------- reconciliation ----------
 def shrink_cov(res: np.ndarray) -> np.ndarray:
     """Schafer-Strimmer shrinkage of the residual covariance towards its diagonal (MinT-shrink)."""
@@ -152,7 +181,7 @@ def average_shares(cells_train: np.ndarray) -> np.ndarray:
 
 
 # ---------- evaluation ----------
-def backtest(cells: pd.DataFrame, H: Hierarchy | None = None, base_fn=ets_base, first_origin: int = FIRST_ORIGIN,
+def backtest(cells: pd.DataFrame, H: Hierarchy | None = None, base_fn=ets_base, origin0: int | None = None,
              max_h: int = MAX_H, methods=METHODS) -> pd.DataFrame:
     """Errors of every method on every series, origin and horizon (long table)."""
     H = H or structure(cells.index)
@@ -160,7 +189,7 @@ def backtest(cells: pd.DataFrame, H: Hierarchy | None = None, base_fn=ets_base, 
     X = cells.to_numpy()
     Y = H.S @ X
     rows = []
-    for origin in range(first_origin, years[-1]):
+    for origin in range(first_origin(years) if origin0 is None else origin0, years[-1]):
         tr = years <= origin
         h = min(max_h, int(years[-1] - origin))
         yhat, res = base_fn(Y[:, tr], h, origin)
@@ -227,16 +256,17 @@ def forecast(cells: pd.DataFrame, method: str, H: Hierarchy | None = None, h: in
     return pd.concat(out, ignore_index=True).join(meta, on="series")
 
 
-def build(history: pd.DataFrame, fm_base: pd.DataFrame | None = None) -> dict:
+def build(history: pd.DataFrame, fm_base: pd.DataFrame | None = None, ets_fn=ets_base) -> dict:
     """Everything the report and dashboard show: backtest tables, the chosen approach, forecasts.
 
     `fm_base`: optional foundation-model base forecasts for the same series (columns model,
     series, origin, h, value; see `foundation.py`). They are reconciled and scored exactly like
     the exponential-smoothing ones, and the best base forecaster and method make the forecast.
+    `ets_fn`: how the smoothing is fitted (`ets_grid_base` for the quick rerun in the dashboard).
     """
     cells = cell_series(history)
     H = structure(cells.index)
-    base_fns, errors = {"ets": ets_base}, {"ets": backtest(cells, H)}
+    base_fns, errors = {"ets": ets_fn}, {"ets": backtest(cells, H, base_fn=ets_fn)}
     if fm_base is not None and len(fm_base):
         for model, d in fm_base.groupby("model"):
             base_fns[model] = fm_base_fn(d, H)

@@ -18,7 +18,8 @@ from .simulate import YEARS
 
 
 def exit_model_shap(workforce, history: pd.DataFrame, n: int = 4000, seed: int = C.SEED):
-    X = features(separation_sample(history).sample(n, random_state=seed))
+    sep = separation_sample(history)
+    X = features(sep.sample(min(n, len(sep)), random_state=seed))
     sv = shap.TreeExplainer(workforce.xgb.model).shap_values(X)
     imp = pd.Series(np.abs(sv).mean(axis=0), index=X.columns).sort_values(ascending=False)
     return imp.rename("mean_abs_shap"), sv, X

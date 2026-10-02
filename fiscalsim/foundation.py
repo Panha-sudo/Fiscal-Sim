@@ -55,7 +55,7 @@ NAMES = {"naive": "Naive (last value)", "mean_8y": "8-year mean", "linear_trend"
          "prophet": "Prophet", "lstm": "LSTM", "chronos_bolt": "Chronos-Bolt", "chronos_2": "Chronos-2",
          "timesfm_2_5": "TimesFM 2.5", "ets": "Exponential smoothing"}
 QUANTILES = (0.1, 0.5, 0.9)
-ROLL_ORIGINS, ROLL_H = range(2008, 2021), 5
+ROLL_ORIGINS, ROLL_H = range(2008, 2021), 5  # for the 1995-2025 series; `roll_origins` follows the data
 FUTURE_H = 10
 WAGE_ORIGINS, WAGE_H = range(2014, 2026), 5
 BASELINES = ("naive", "mean_8y", "linear_trend", "arima", "prophet", "lstm")
@@ -100,12 +100,20 @@ LOADERS = {"chronos_bolt": _chronos, "chronos_2": _chronos, "timesfm_2_5": _time
 
 
 # ---------- tasks: which histories to forecast ----------
+def roll_origins(macro: pd.DataFrame) -> range:
+    """Starting years of the rolling test: up to 13, each with at least 8 years of history and
+    5 years to score (2008-2020 for 1995-2025)."""
+    first, last = int(macro["year"].min()), int(macro["year"].max())
+    return range(max(first + 7, last - 17), last - ROLL_H + 1)
+
+
 def macro_tasks(macro: pd.DataFrame) -> list[dict]:
     """Every (series, origin, horizon) the macro tests need: rolling origins, M5's origin, the future."""
     y = macro.set_index("year")
     last = int(y.index.max())
-    plan = {o: ROLL_H for o in ROLL_ORIGINS}
-    for o, h in ((m5.TRAIN_END, last - m5.TRAIN_END), (last, FUTURE_H)):
+    plan = {o: ROLL_H for o in roll_origins(macro)}
+    end = m5.train_end(macro)
+    for o, h in ((end, last - end), (last, FUTURE_H)):
         plan[o] = max(plan.get(o, 0), h)  # a longer run from the same origin also covers the shorter one
     tasks = []
     for target in m5.TARGETS:
@@ -273,7 +281,7 @@ def score_macro(macro: pd.DataFrame, fm: pd.DataFrame | None, base: pd.DataFrame
     # 1. same design as M5: origin 2017, the eight years 2018-2025 in one run, scored on the implied level
     same = []
     for target in m5.TARGETS:
-        d = f[(f["series"] == target) & (f["origin"] == m5.TRAIN_END)].sort_values("h")
+        d = f[(f["series"] == target) & (f["origin"] == m5.train_end(macro))].sort_values("h")
         preds = {m: m5._to_level(target, g.sort_values("h")["q50"]) for m, g in d.groupby("model")}
         act = m5._to_level(target, d[d["model"] == "naive"]["actual"])
         for m in models:
@@ -288,7 +296,8 @@ def score_macro(macro: pd.DataFrame, fm: pd.DataFrame | None, base: pd.DataFrame
     same = pd.DataFrame(same)
 
     # 2. rolling origins 2008-2020, 1-5 years ahead, error in percentage points of the annual rate
-    r = f[f["origin"].isin(ROLL_ORIGINS) & (f["h"] <= ROLL_H)].copy()
+    origins = roll_origins(macro)
+    r = f[f["origin"].isin(origins) & (f["h"] <= ROLL_H)].copy()
     r["abs_err_pp"] = (r["q50"] - r["actual"]).abs() * 100
     r["covered"] = np.where(r["q10"].notna(), (r["actual"] >= r["q10"]) & (r["actual"] <= r["q90"]), np.nan)
     ql = sum(pinball(r[f"q{int(q * 100)}"], r["actual"], q) for q in QUANTILES) * 2 / len(QUANTILES) * 100
@@ -306,7 +315,7 @@ def score_macro(macro: pd.DataFrame, fm: pd.DataFrame | None, base: pd.DataFrame
             row |= {f"MAE_h{h}": d[d["h"] == h]["abs_err_pp"].mean() for h in range(1, ROLL_H + 1)}
             row |= {"coverage_80_%": d["covered"].mean() * 100, "quantile_loss_pp": d["qloss_pp"].mean()}
             for ref in ("arima", "lstm"):
-                if m in FOUNDATION and (target, ref, ROLL_ORIGINS[0]) in per_origin.index:
+                if m in FOUNDATION and (target, ref, origins[0]) in per_origin.index:
                     a, b = per_origin.loc[(target, m)], per_origin.loc[(target, ref)]
                     stat, pv = dm_hln(a.to_numpy(), b.reindex(a.index).to_numpy(), h=ROLL_H)
                     row[f"DM_vs_{ref}"], row[f"p_vs_{ref}"] = stat, pv
@@ -320,7 +329,7 @@ def score_macro(macro: pd.DataFrame, fm: pd.DataFrame | None, base: pd.DataFrame
     overall["mean_rank"] = rolling.groupby("target")["MAE_pp"].rank().groupby(rolling["model"]).mean().reindex(models)
     future = f[f["origin"] == int(macro["year"].max())][["series", "model", "year", "q10", "q50", "q90"]]
     return {"same_as_m5": same, "rolling": rolling, "overall": overall, "future": future.reset_index(drop=True),
-            "models": models, "origins": list(ROLL_ORIGINS), "h": ROLL_H}
+            "models": models, "origins": list(origins), "h": ROLL_H, "train_end": m5.train_end(macro)}
 
 
 def wage_fm_base(fm: pd.DataFrame | None) -> pd.DataFrame | None:

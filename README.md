@@ -62,7 +62,7 @@ To run it on your own computer, put the same lines in `.streamlit/secrets.toml` 
 | Ministries and provinces | Base-year headcount, age, wage bill and M1 flags by ministry or province, with the projected wage bill under any scenario |
 | What drives results | SHAP charts for policy levers, economic uncertainty and the exit model |
 | Model checks | M1, M2 and M5 backtests and the Kaplan-Meier curves |
-| Your data | Upload your own payroll extract (CSV or Excel) and, optionally, the pensioner register. M1 cleans it and every scenario re-runs on it. You can download an example file |
+| Your data | Upload your own files in place of the synthetic ones (see below). Each file is checked, the models that use it are refitted, and every scenario re-runs on it |
 | Export | An Excel workbook with the summary, yearly bands, adequacy, workforce, sector, ministry and province tables, levers and flagged records, or the summary as a CSV |
 
 The language switch in the sidebar changes the app between English and Khmer. The Khmer labels in `fiscalsim/i18n.py` are a first translation, so please check the terms against MEF, MCS and NSSF usage.
@@ -111,6 +111,21 @@ Streamlit app does not have. They run separately and the app scores their saved 
 With real data, run step 3 on a machine you control with `--inputs` and `--out` pointing to a private folder, and do
 not commit the series or the forecasts: the repository is public.
 
+## Your own files in the dashboard
+
+The Your data tab takes up to four files from your computer, as CSV, Excel or Parquet. Upload any of them; whatever you leave out stays synthetic. Each upload has an example file to download and a list of its columns. Problems such as missing columns, unknown codes or gaps in the years are shown before anything runs.
+
+| File | Required columns | What it changes |
+|---|---|---|
+| Payroll or HRMIS extract (base year) | `age`, `sector`, `framework`, `service`, `basic_salary` | M1 checks, the base year of every scenario, retirement waves, ministry and province tables |
+| NSSF-C pensioner register | `age`, `monthly_pension` | Pension spending and the fund in every scenario |
+| Staff history (one row per person per year, 6+ years) | `person_id`, `year`, `age`, `service`, `sector`, `framework` | M2 exit model and its backtest, Kaplan-Meier curves, exit-model SHAP, the retirement-wave backtest, the wage bill forecast by province and ministry, and every scenario through the exit model |
+| Macro history (one row per year, 15+ years) | `year`, `real_growth`, `inflation`, `revenue_share_gdp` | M5 backtest and model choice, the Monte Carlo paths behind every scenario, and the forecast benchmark |
+
+The staff history can also have `exit_type`, `promoted`, `eligible60`, `province` and `ministry`. Without `exit_type`, a person's last year before the final snapshot counts as an exit (a retirement at retirement age, otherwise a separation). Macro values can be shares (0.052) or percentages (5.2).
+
+Files stay in the browser session and are never written to disk or to this repository. On Streamlit Community Cloud the refit is lighter than the offline build: the exit model trains on at most 300,000 person-years, the wage bill smoothing is fitted on a parameter grid, scenarios use 1,000 Monte Carlo runs, and M5 has no Prophet or LSTM. The pretrained forecasting models and the pension fund risk model are not retrained. A full national history (2.6 million person-years in the synthetic data) takes about a minute and up to 2 GB of memory; for anything larger, use the offline build below.
+
 ## Modelling choices to review
 
 - **Current pension rule** is 80% of the final basic salary after 20 or more years of service (the ILO finding that 20 and 30 years pay the same), with a minimum pension that moves with pay. Under 20 years of service, the retiree gets a lump sum.
@@ -122,7 +137,7 @@ not commit the series or the forecasts: the repository is public.
 
 ## Moving to real data
 
-1. Replace `data/hrmis_2026.csv` with the aggregated or anonymised MCS extract, using the same columns. Replace `staff_history.parquet` with the yearly HRMIS snapshots.
+1. Replace `data/hrmis_2026.csv` with the aggregated or anonymised MCS extract, using the same columns. Replace `staff_history.parquet` with the yearly HRMIS snapshots. Delete `data/hrmis_2026_truth.csv`: only the synthetic generator writes it (it lists the planted anomalies), and without it M1 reports how many records it flags instead of precision and recall.
 2. Put the Budget Law pay scales, NSSF-C rules and NIS, NBC and IMF series into `config.py` and `data/macro_history.csv`.
 3. Rerun `python -m fiscalsim.run` without `--regenerate`, then check the base-year wage bill against the Budget Law total. That check is the model-validity test in proposal Table 6.
 4. Do not commit `outputs/dashboard_bundle.pkl` after building it from real data. It holds staff counts by province, ministry, age and service, and a sample of the input records. Keep real-data builds on a machine or server you control.

@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 
 from . import config as C
+from . import m2_workforce as m2
+from . import m5_macro as m5
 from .simulate import YEARS, fan
 
 # Reference categorical palette, fixed order (one slot per scenario S0..S6)
@@ -106,18 +108,23 @@ def _fmt(x, d=2):
 def markdown(ctx, results, table, shap_out, out: Path, runs: int, opt: dict | None = None,
              wave: dict | None = None, risk: dict | None = None, hier: dict | None = None,
              fm: dict | None = None) -> str:
-    ev = ctx.m1["evaluation"]
+    ev = ctx.m1.get("evaluation")
+    synthetic = ev is not None  # the answer key only exists for generated data
     bt2 = ctx.m2_backtest["table"]
     bt5 = ctx.m5_backtest
+    bt2o = ctx.m2_backtest.get("origin", m2.TRAIN_END)
+    bt5o = m5.train_end(ctx.data["macro"])
     lines = [
-        "# AI fiscal simulation prototype: results on synthetic data",
+        "# AI fiscal simulation prototype: results" + (" on synthetic data" if synthetic else ""),
         "",
         f"Base year {C.BASE_YEAR}, horizon {C.END_YEAR}, {runs:,} Monte Carlo runs, seed {C.SEED}.",
         "",
-        "> All inputs are synthetic, shaped like HRMIS, payroll, Budget Law, NSSF-C and macro data and",
-        "> calibrated to placeholder totals in `fiscalsim/config.py`. Numbers illustrate how the model",
-        "> works; they are not estimates for Cambodia until the placeholders are replaced with official data.",
-        "",
+        *(["> All inputs are synthetic, shaped like HRMIS, payroll, Budget Law, NSSF-C and macro data and",
+           "> calibrated to placeholder totals in `fiscalsim/config.py`. Numbers illustrate how the model",
+           "> works; they are not estimates for Cambodia until the placeholders are replaced with official data.",
+           ""] if synthetic else
+          ["> Built from the files in the data folder (no synthetic answer key found). Placeholders still in",
+           "> `fiscalsim/config.py` (marked `# SOURCE:`) apply until they are replaced with official figures.", ""]),
         "## Scenario comparison",
         "",
         "Median of Monte Carlo runs, with the 90% band in brackets. Total cost = wage bill + government",
@@ -182,22 +189,21 @@ def markdown(ctx, results, table, shap_out, out: Path, runs: int, opt: dict | No
         "",
         "## M1 Data quality",
         "",
-        ev.to_markdown(),
+        *([ev.to_markdown(), "",
+           f"Payroll on records needing verification (synthetic truth): {ctx.m1['payroll_leakage_riel'] / 1e9:,.0f} billion riel a year.",
+           "A flag is a prompt to check a record against source documents, not a finding of wrongdoing.", "",
+           "Recall by check type:", "", ctx.m1["recall_by_type"].to_markdown()] if synthetic else
+          [f"{int(ctx.m1['records']['flag'].sum()):,} of {len(ctx.m1['records']):,} records set aside for verification. "
+           "Precision and recall need known answers, which only the synthetic data has.",
+           "A flag is a prompt to check a record against source documents, not a finding of wrongdoing."]),
         "",
-        f"Payroll on records needing verification (synthetic truth): {ctx.m1['payroll_leakage_riel'] / 1e9:,.0f} billion riel a year.",
-        "A flag is a prompt to check a record against source documents, not a finding of wrongdoing.",
-        "",
-        "Recall by check type:",
-        "",
-        ctx.m1["recall_by_type"].to_markdown(),
-        "",
-        "## M2 Workforce projection (backtest: train to 2021, test 2022-2025)",
+        f"## M2 Workforce projection (backtest: train to {bt2o}, test {bt2o + 1}-{bt2o + m2.TEST_YEARS})",
         "",
         bt2.to_markdown(),
         "",
         "![Exit model SHAP](charts/shap_exit_model.png)",
         "",
-        "## M5 Macro forecast (backtest: train to 2017, test 2018-2025)",
+        f"## M5 Macro forecast (backtest: train to {bt5o}, test {bt5o + 1}-{bt5o + m5.TEST_YEARS})",
         "",
         bt5.pivot(index="model", columns="target", values="MAPE_%").to_markdown(),
         "",
@@ -312,7 +318,8 @@ def risk_markdown(risk: dict) -> list[str]:
 
 
 def foundation_markdown(fm: dict) -> list[str]:
-    from .foundation import FOUNDATION, NAMES, ROLL_H, ROLL_ORIGINS
+    from .foundation import FOUNDATION, NAMES, ROLL_H
+    o0, o1, end = fm["origins"][0], fm["origins"][-1], fm["train_end"]
     info = fm.get("info") or {}
     ran = [m for m in fm["models"] if m in FOUNDATION]
     lines = ["## Time-series foundation models against M5's forecasters", "",
@@ -326,9 +333,9 @@ def foundation_markdown(fm: dict) -> list[str]:
     same = fm["same_as_m5"].assign(model=lambda d: d["model"].map(NAMES))
     roll = fm["rolling"].assign(model=lambda d: d["model"].map(NAMES))
     ov = fm["overall"].rename(index=NAMES)
-    lines += ["", "### Same test as M5: train 1995-2017, forecast 2018-2025 in one run (MAPE of the level, %)", "",
+    lines += ["", f"### Same test as M5: train to {end}, forecast {end + 1}-{end + m5.TEST_YEARS} in one run (MAPE of the level, %)", "",
               same.pivot(index="model", columns="target", values="MAPE_%").reindex(ov.index).to_markdown(), "",
-              f"### Rolling origins: forecasts 1 to {ROLL_H} years ahead from each year {ROLL_ORIGINS[0]}-{ROLL_ORIGINS[-1]}", "",
+              f"### Rolling origins: forecasts 1 to {ROLL_H} years ahead from each year {o0}-{o1}", "",
               "Error in percentage points of the annual rate. Relative error: model error / naive error, geometric "
               "mean over the three series (below 1 beats the naive forecast). Coverage: share of actual values inside "
               "the model's 80% range. Quantile loss: average pinball loss at the 10th, 50th and 90th percentiles, "
@@ -339,7 +346,8 @@ def foundation_markdown(fm: dict) -> list[str]:
     if len(dm):
         lines += ["Diebold-Mariano tests on each origin's average absolute error (Harvey-Leybourne-Newbold, "
                   f"{ROLL_H - 1} lags; negative = the foundation model has the smaller error):", "",
-                  dm[["target", "model", "DM_vs_arima", "p_vs_arima", "DM_vs_lstm", "p_vs_lstm"]].round(3)
+                  dm[[c for c in ("target", "model", "DM_vs_arima", "p_vs_arima", "DM_vs_lstm", "p_vs_lstm")
+                      if c in dm]].round(3)
                   .to_markdown(index=False), ""]
     return lines
 

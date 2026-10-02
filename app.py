@@ -7,6 +7,7 @@ ministry and province, run the model on your own payroll file, and export to Exc
 from __future__ import annotations
 
 import copy
+import hashlib
 import pickle
 import sys
 from pathlib import Path
@@ -43,6 +44,7 @@ from fiscalsim import foundation as FD
 from fiscalsim import fund_risk as R
 from fiscalsim import m1_data_quality as m1
 from fiscalsim import optimize as O
+from fiscalsim import refit
 from fiscalsim import simulate as S
 from fiscalsim import wave as W
 from fiscalsim.i18n import EN as I18N_EN
@@ -69,10 +71,11 @@ B = load()
 E = B["engine"]
 
 
-def engine_ctx(stock0=None, pensioners=None):
-    return SimpleNamespace(workforce=E["workforce"], stock0=E["stock0"] if stock0 is None else stock0,
+def engine_ctx(stock0=None, pensioners=None, workforce=None, paths=None):
+    return SimpleNamespace(workforce=E["workforce"] if workforce is None else workforce,
+                           stock0=E["stock0"] if stock0 is None else stock0,
                            data={"pensioners": E["pensioners"] if pensioners is None else pensioners},
-                           paths=E["paths"])
+                           paths=E["paths"] if paths is None else paths)
 
 
 def synthetic_state():
@@ -85,6 +88,8 @@ ss = st.session_state
 ss.setdefault("data", synthetic_state())
 ss.setdefault("custom", {})  # name -> (Scenario, result)
 D = ss["data"]
+M = {**B, "m2_origin": S.m2.TRAIN_END, **D.get("models", {})}  # published results, with any refitted on uploads
+UP = D.get("uploads", {})  # kind -> file name, for the files in use
 
 # ---------- sidebar ----------
 with st.sidebar:
@@ -172,12 +177,88 @@ def hbar(s, xtitle):
         height=max(260, 26 * len(s) + 60), xaxis_title=xtitle, margin=dict(l=10, r=10, t=10, b=10))
 
 
+# ---------- your own files ----------
+def parse_upload(kind, f):
+    """(table or None, errors, notes) for one uploaded file. Kept in this session only, one copy per file
+    (a staff history can be a few hundred MB, so it is not copied into Streamlit's shared cache)."""
+    store = ss.setdefault("parsed", {})
+    if kind in store and store[kind][0] == f.file_id:
+        return store[kind][1]
+    try:
+        df = upload.read_table(f.name, f.getvalue())
+    except Exception as e:  # unreadable file: say why rather than fail the page
+        out = None, [t("data_read_error", lang, e=str(e)[:200])], []
+    else:
+        if kind == "pensioners":
+            table, errors = upload.prepare_pensioners(df)
+            out = table, errors, []
+        else:
+            out = {"hrmis": upload.prepare_hrmis, "history": upload.prepare_history,
+                   "macro": upload.prepare_macro}[kind](df)
+        del df
+    store[kind] = (f.file_id, out)
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def example_history_csv():
+    return upload.example_history().to_csv(index=False).encode()
+
+
+UPLOADS = [  # kind, title, what it changes, required and optional columns, example file, example file name
+    ("hrmis", "data_hrmis_title", "data_hrmis_what", upload.REQUIRED, upload.OPTIONAL,
+     lambda: upload.template_csv(B.get("hrmis_sample")), "hrmis_example.csv"),
+    ("pensioners", "data_pens_title", "data_pens_what", upload.PENSIONER_REQUIRED, {},
+     lambda: E["pensioners"].head(50).to_csv(index=False).encode(), "pensioners_example.csv"),
+    ("history", "data_hist_title", "data_hist_what", upload.HISTORY_REQUIRED, upload.HISTORY_OPTIONAL,
+     example_history_csv, "staff_history_example.csv"),
+    ("macro", "data_macro_title", "data_macro_what", upload.MACRO_REQUIRED, upload.MACRO_OPTIONAL,
+     lambda: B["macro"][[*upload.MACRO_REQUIRED, "gdp_nominal"]].to_csv(index=False).encode(), "macro_example.csv"),
+]
+
+
+def run_uploads(ready: dict, files: dict, log) -> dict:
+    """Refit what depends on each uploaded file and rerun every scenario. Returns the new data state."""
+    models, rows_used = {}, None
+    workforce, paths = E["workforce"], E["paths"]
+    if "history" in ready:
+        hm = refit.history_models(ready["history"], log)
+        workforce, rows_used = hm["workforce"], hm["rows_used"]
+        models |= {k: hm[k] for k in ("m2", "km", "wave_backtest", "hierarchy")}
+        models |= {"m2_origin": hm["wave_backtest"]["origin"], "shap": {**B["shap"], "exit": hm["shap_exit"]}}
+    if "macro" in ready:
+        mm = refit.macro_models(ready["macro"], log)
+        paths = mm["paths"]
+        models |= {k: mm[k] for k in ("m5", "m5_choice", "central", "macro", "foundation")}
+    r1 = None
+    if "hrmis" in ready:
+        log("payroll")
+        r1 = m1.run(ready["hrmis"])
+    ctx = engine_ctx(S.m2.base_stock(r1["clean"]) if r1 else None, ready.get("pensioners"), workforce, paths)
+    log("scenarios")
+    results = {k: S.run_scenario(ctx, sc) for k, sc in C.SCENARIOS.items()}
+    names = {k: files[k].name for k in ready}
+    sha = hashlib.sha1()
+    for k in sorted(ready):
+        sha.update(files[k].getvalue())
+    digest = sha.hexdigest()[:6]
+    state = {"source": f"{' + '.join(names.values())} · {digest}", "runs": len(paths["cpi"]), "ctx": ctx,
+             "frames": S.results_frames(results), "m1": r1, "uploads": names, "models": models, "rows_used": rows_used,
+             "base": breakdown.base_table(r1["records"]) if r1 else B["base_breakdown"],
+             "cells": W.cells(r1["clean"]) if r1 else B.get("wave_cells")}
+    if r1:
+        state |= {"n_records": len(r1["records"]), "n_flagged": int(r1["records"]["flag"].sum())}
+    return state
+
+
 # ---------- header ----------
 st.title(t("title", lang))
 if D["source"] == "synthetic":
     st.caption(t("caption_synthetic", lang, runs=D["runs"]))
 else:
-    st.caption(t("caption_uploaded", lang, n=D["n_records"], flagged=D["n_flagged"], runs=D["runs"]))
+    st.caption(t("caption_files", lang, files=", ".join(UP.values()) or D["source"]) + " "
+               + (t("caption_uploaded", lang, n=D["n_records"], flagged=D["n_flagged"], runs=D["runs"])
+                  if D["m1"] is not None else t("caption_runs", lang, runs=D["runs"])))
 
 TAB_KEYS = ("tab_compare", "tab_ask", "tab_build", "tab_opt", "tab_wave", "tab_risk", "tab_forecast", "tab_adequacy", "tab_units", "tab_drivers", "tab_checks", "tab_data", "tab_export")
 TAB = dict(zip(TAB_KEYS, st.tabs([t(k, lang) for k in TAB_KEYS])))
@@ -505,7 +586,7 @@ with TAB["tab_wave"]:
                        horizontal=True, key="wave_lvl")
         hz = c3.slider(t("wave_horizon", lang), 5, 15, 10, key="wave_hz")
         if D["source"] != "synthetic":
-            st.caption(t("wave_upload_note", lang))
+            st.caption(t("wave_upload_hist" if "history" in UP else "wave_upload_note", lang))
         wcells = D["cells"]
         wyears = np.arange(C.BASE_YEAR, C.BASE_YEAR + W.HORIZON)
         wex = W.exit_paths(wcells, D["ctx"].workforce, scenario_of(wsc), wyears)
@@ -561,7 +642,7 @@ with TAB["tab_wave"]:
         driver = contrib.abs().idxmax()
         st.write(t("wave_why_text", lang, unit=unit_name(unit), share=wtab.loc[unit, "leave_h"], h=hz,
                    nat=wnat["share_h"], driver=driver.lower() if lang == "en" else driver, pp=contrib[driver]))
-        bt = B.get("wave_backtest")
+        bt = M.get("wave_backtest")
         if bt:
             with st.expander(t("wave_check", lang)):
                 st.write(t("wave_check_text", lang, origin=bt["origin"], y0=bt["years"][0], y1=bt["years"][-1],
@@ -718,7 +799,7 @@ def units_forecast(HR):
 def macro_models(FMR):
     st.write(t("fm_intro", lang))
     if not any(m in FD.FOUNDATION for m in FMR["models"]):
-        st.info(t("fm_not_run", lang))
+        st.info(t("fm_upload" if "macro" in UP else "fm_not_run", lang))
     else:
         st.caption(t("fm_ran", lang, date=FMR.get("info", {}).get("date", "")))
     st.subheader(t("fm_summary", lang, h=FMR["h"], o0=FMR["origins"][0], o1=FMR["origins"][-1]))
@@ -751,7 +832,7 @@ def macro_models(FMR):
                       legend=dict(orientation="h", x=0, y=-0.2))
     c1.plotly_chart(fig, width="stretch")
 
-    macro = B["macro"]
+    macro = M["macro"]
     last = int(macro["year"].max())
     fut = FMR["future"][FMR["future"].series == target]
     fig = go.Figure()
@@ -763,7 +844,7 @@ def macro_models(FMR):
                                  fill="toself", fillcolor=col, opacity=0.12, line=dict(width=0), hoverinfo="skip",
                                  showlegend=False))
         fig.add_trace(go.Scatter(x=d.year, y=d.q50 * 100, name=model_name(m), line=dict(color=col, width=2)))
-    cen = B["central"][target].iloc[:len(fut["year"].unique())] * 100
+    cen = M["central"][target].iloc[:len(fut["year"].unique())] * 100
     fig.add_trace(go.Scatter(x=cen.index, y=cen.values, name=t("fm_m5_path", lang), line=dict(color="#333", width=2, dash="dash")))
     shown = np.r_[macro.loc[macro.year >= last - 15, target], fut.q10.dropna(), fut.q90.dropna(), cen / 100] * 100
     pad = 0.1 * (shown.max() - shown.min())
@@ -780,7 +861,7 @@ def macro_models(FMR):
             dm.index = [model_name(m) for m in dm.index]
             st.dataframe(dm.style.format("{:.2f}", na_rep="–"), width="stretch")
             st.caption(t("fm_dm_text", lang, n=len(FMR["origins"])))
-    with st.expander(t("fm_same", lang, y0=FD.m5.TRAIN_END, y1=FD.m5.TRAIN_END + 1, y2=last)):
+    with st.expander(t("fm_same", lang, y0=FMR.get("train_end", FD.m5.TRAIN_END), y1=FMR.get("train_end", FD.m5.TRAIN_END) + 1, y2=last)):
         same = FMR["same_as_m5"].pivot(index="model", columns="target", values="MAPE_%")[list(FD.m5.TARGETS)]
         same = same.reindex([m for m in ov.index if m in same.index])
         same.index = [model_name(m) for m in same.index]
@@ -790,15 +871,15 @@ def macro_models(FMR):
 
 
 with TAB["tab_forecast"]:
-    HR, FMR = B.get("hierarchy"), B.get("foundation")
+    HR, FMR = M.get("hierarchy"), M.get("foundation")
     if not HR or not FMR:
         st.info(t("fc_missing", lang))
     else:
-        if D["source"] != "synthetic":
-            st.caption(t("fc_upload_note", lang))
         part = st.radio(t("fc_show", lang), ["units", "macro"], format_func=lambda k: t(f"fc_part_{k}", lang),
                         horizontal=True, key="fc_part")
         if part == "units":
+            if D["source"] != "synthetic":
+                st.caption(t("fc_hist_yours" if "history" in UP else "fc_hist_synth", lang))
             units_forecast(HR)
         else:
             macro_models(FMR)
@@ -855,7 +936,9 @@ with TAB["tab_units"]:
 
 # ---------- drivers ----------
 with TAB["tab_drivers"]:
-    sh = B["shap"]
+    sh = M["shap"]
+    if D["source"] != "synthetic":
+        st.caption(t("drivers_upload_hist" if "history" in UP else "drivers_upload_synth", lang))
     c1, c2 = st.columns(2)
     c1.subheader(t("drivers_policy", lang))
     c1.plotly_chart(hbar(sh["policy"], t("shap_axis_gdp", lang)), width="stretch")
@@ -868,71 +951,97 @@ with TAB["tab_drivers"]:
 with TAB["tab_checks"]:
     st.subheader(t("checks_m1", lang))
     st.info(t("m1_note", lang))
-    if D["source"] == "synthetic":
+    if D["source"] == "synthetic" and B.get("m1") is not None:
         st.dataframe(B["m1"], width="stretch")
         st.dataframe(B["m1_types"].rename(index=lambda k: check_label(k, lang)), width="stretch")
     else:
         st.caption("Precision and recall need known answers, which only the synthetic data has. "
                    "The Your data tab shows which records M1 asks you to verify and why.")
-    st.subheader(t("checks_m2", lang))
-    st.dataframe(B["m2"], width="stretch")
-    km = B["km"]
+    st.subheader(t("checks_m2", lang, y0=M["m2_origin"] + 1, y1=M["m2_origin"] + S.m2.TEST_YEARS))
+    if "history" in UP:
+        st.caption(t("checks_from_upload", lang))
+    st.dataframe(M["m2"], width="stretch")
+    km = M["km"]
     fig = go.Figure()
     for i, (s, d) in enumerate(km.groupby("sector")):
         fig.add_trace(go.Scatter(x=d.service_years, y=d.survival, name=s, line=dict(color=PALETTE[i], width=2)))
     fig.update_layout(height=340, xaxis_title=t("checks_km_x", lang), yaxis_title=t("checks_km_y", lang),
                       margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, width="stretch")
-    st.subheader(t("checks_m5", lang))
-    st.dataframe(B["m5"].pivot(index="model", columns="target", values="MAPE_%"), width="stretch")
-    st.caption(f"{t('checks_chosen', lang)}: {B['m5_choice']}")
+    m5_end = S.m5.train_end(M["macro"])
+    st.subheader(t("checks_m5", lang, y0=m5_end + 1, y1=m5_end + S.m5.TEST_YEARS))
+    if "macro" in UP:
+        st.caption(t("checks_from_upload", lang))
+    st.dataframe(M["m5"].pivot(index="model", columns="target", values="MAPE_%"), width="stretch")
+    st.caption(f"{t('checks_chosen', lang)}: {M['m5_choice']}")
 
 # ---------- your data ----------
 with TAB["tab_data"]:
     st.write(t("data_intro", lang))
-    st.download_button(t("data_template", lang), upload.template_csv(B.get("hrmis_sample")),
-                       file_name="hrmis_template.csv", mime="text/csv")
-    with st.expander(t("data_required", lang) + " / " + t("data_optional", lang)):
-        st.table(pd.DataFrame(
-            [(c, d, "") for c, d in upload.REQUIRED.items()] + [(c, d, dflt) for c, (d, dflt) in upload.OPTIONAL.items()],
-            columns=["column", "meaning", "default if missing"]))
-    f_hr = st.file_uploader(t("data_upload_hrmis", lang), type=["csv", "xlsx", "xls"], key="up_hr")
-    f_pn = st.file_uploader(t("data_upload_pens", lang), type=["csv", "xlsx", "xls"], key="up_pn")
-    if f_hr is not None:
-        recs, errors, notes = upload.prepare_hrmis(upload.read_table(f_hr.name, f_hr.getvalue()))
-        pens, perr = (None, [])
-        if f_pn is not None:
-            pens, perr = upload.prepare_pensioners(upload.read_table(f_pn.name, f_pn.getvalue()))
-        if errors or perr:
-            st.error(t("data_errors", lang) + ":\n\n- " + "\n- ".join(errors + perr))
-        else:
-            if notes:
-                st.info(t("data_notes", lang) + ":\n\n- " + "\n- ".join(notes))
-            if st.button(t("data_run", lang), type="primary"):
-                with st.spinner(t("data_running", lang)):
-                    r1 = m1.run(recs)
-                    ctx = engine_ctx(S.m2.base_stock(r1["clean"]), pens)
-                    results = {k: S.run_scenario(ctx, sc) for k, sc in C.SCENARIOS.items()}
-                    ss["data"] = {"source": f_hr.name, "runs": len(E["paths"]["cpi"]), "ctx": ctx,
-                                  "base": breakdown.base_table(r1["records"]),
-                                  "frames": S.results_frames(results), "m1": r1, "cells": W.cells(r1["clean"]),
-                                  "n_records": len(recs), "n_flagged": int(r1["records"]["flag"].sum())}
-                    ss["custom"] = {k: (sc, S.run_scenario(ctx, sc)) for k, (sc, _) in ss["custom"].items()}
-                st.rerun()
+    uploaded = {}
+    for kind, title, what, req, opt, example, fname in UPLOADS:
+        with st.container(border=True):
+            st.markdown(f"**{t(title, lang)}**")
+            st.caption(t(what, lang))
+            c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+            f = c1.file_uploader(t("data_upload_file", lang), type=["csv", "xlsx", "xls", "parquet"], key=f"up_{kind}")
+            c2.download_button(t("data_template", lang), example(), file_name=fname, mime="text/csv", key=f"ex_{kind}")
+            with st.expander(t("data_columns", lang)):
+                st.table(upload.column_table(req, opt))
+            if f is None:
+                ss.get("parsed", {}).pop(kind, None)
+            else:
+                with st.spinner(t("data_checking", lang)):
+                    df, errors, notes = parse_upload(kind, f)
+                if errors:
+                    st.error(t("data_errors", lang) + ":\n\n- " + "\n- ".join(errors))
+                else:
+                    st.success(t("data_ok", lang))
+                    if notes:
+                        st.info(t("data_notes", lang) + ":\n\n- " + "\n- ".join(notes))
+                uploaded[kind] = (f, df, errors)
+
+    ready = {k: df for k, (_, df, errors) in uploaded.items() if not errors}
+    if not uploaded:
+        st.caption(t("data_need_file", lang))
+    elif len(ready) < len(uploaded):
+        st.warning(t("data_fix_first", lang))
+    else:
+        st.caption(t("data_light", lang, rows=refit.MAX_ROWS, runs=refit.RUNS))
+        if st.button(t("data_run", lang), type="primary"):
+            with st.status(t("data_running", lang), expanded=True) as status:
+                ss["data"] = run_uploads(ready, {k: f for k, (f, _, _) in uploaded.items()},
+                                         lambda step: status.write(t(f"data_step_{step}", lang)))
+                ss["custom"] = {k: (sc, S.run_scenario(ss["data"]["ctx"], sc)) for k, (sc, _) in ss["custom"].items()}
+                status.update(label=t("data_finished", lang), state="complete")
+            st.rerun()
+
     if D["source"] != "synthetic":
-        st.success(t("data_done", lang, n=D["n_records"], f=D["n_flagged"], k=D["n_records"] - D["n_flagged"]))
-        recs = D["m1"]["records"]
-        flagged = recs[recs["flag"]]
-        reasons = pd.Series({
-            "duplicate_match": int(m1.record_matching(recs).sum()),
-            "iforest": int(recs["iforest_flag"].sum()),
-            **{k: int(v) for k, v in m1.rule_flags(recs)[["past_retirement", "no_attendance", "off_scale_salary"]].sum().items()},
-        }, name="records").rename(index=lambda k: check_label(k, lang))
-        st.info(t("m1_note", lang))
-        st.subheader(t("data_flag_reasons", lang))
-        st.dataframe(reasons, width="stretch")
-        st.subheader(t("data_flagged_rows", lang))
-        st.dataframe(flagged.sort_values("anomaly_score", ascending=False).head(500), width="stretch")
+        st.divider()
+        ups = D.get("uploads", {})
+        st.success(t("data_using", lang, files=", ".join(ups.values()) or D["source"]))
+        if D["m1"] is not None:
+            st.write(t("data_done", lang, n=D["n_records"], f=D["n_flagged"], k=D["n_records"] - D["n_flagged"]))
+        if "pensioners" in ups:
+            st.write(t("data_rebuilt_pens", lang, n=len(D["ctx"].data["pensioners"])))
+        if "history" in ups:
+            st.write(t("data_rebuilt_history", lang, rows=D["rows_used"]))
+        if "macro" in ups:
+            st.write(t("data_rebuilt_macro", lang, choice=", ".join(f"{t('fm_' + k, lang)}: {FD.NAMES.get(v, v)}"
+                                                                    for k, v in M["m5_choice"].items())))
+        if D["m1"] is not None:
+            recs = D["m1"]["records"]
+            flagged = recs[recs["flag"]]
+            reasons = pd.Series({
+                "duplicate_match": int(m1.record_matching(recs).sum()),
+                "iforest": int(recs["iforest_flag"].sum()),
+                **{k: int(v) for k, v in m1.rule_flags(recs)[["past_retirement", "no_attendance", "off_scale_salary"]].sum().items()},
+            }, name="records").rename(index=lambda k: check_label(k, lang))
+            st.info(t("m1_note", lang))
+            st.subheader(t("data_flag_reasons", lang))
+            st.dataframe(reasons, width="stretch")
+            st.subheader(t("data_flagged_rows", lang))
+            st.dataframe(flagged.sort_values("anomaly_score", ascending=False).head(500), width="stretch")
         if st.button(t("data_reset", lang)):
             ss["data"] = synthetic_state()
             ss["custom"] = {k: (sc, S.run_scenario(ss["data"]["ctx"], sc)) for k, (sc, _) in ss["custom"].items()}
@@ -944,7 +1053,7 @@ with TAB["tab_export"]:
     base = D["base"]
     scen = dict(C.SCENARIOS) | {k: sc for k, (sc, _) in ss["custom"].items()}
     source = ("Synthetic data shaped like HRMIS, Budget Law, NSSF-C and macro inputs"
-              if D["source"] == "synthetic" else f"Uploaded payroll file {D['source']}")
+              if D["source"] == "synthetic" else f"Uploaded files: {', '.join(UP.values()) or D['source']}; anything else synthetic")
     extra = {}
     if D["m1"] is not None:
         extra["M1 records to verify"] = D["m1"]["records"][D["m1"]["records"]["flag"]].drop(columns=["bank_account"], errors="ignore")

@@ -158,8 +158,8 @@ def _wape(actual, pred):
     return float(np.abs(pred - actual).sum() / actual.sum() * 100)
 
 
-def backtest(history: pd.DataFrame, origin: int = m2.TRAIN_END, level=("province", "sector"),
-             top: float = 0.2) -> dict:
+def backtest(history: pd.DataFrame, origin: int | None = None, level=("province", "sector"),
+             top: float = 0.2, sample_frac: float = 0.5) -> dict:
     """Predict exits by unit and year after `origin` from the staff in post then, and score them.
 
     model        age rule + mortality + XGBoost separation hazard trained on years <= origin
@@ -168,9 +168,10 @@ def backtest(history: pd.DataFrame, origin: int = m2.TRAIN_END, level=("province
     Scores: WAPE of exits by unit and year, rank correlation of 4-year exit shares, and the
     warning hit rate (share of the units flagged in the top `top` that really were in the top).
     """
+    origin = m2.backtest_origin(history) if origin is None else origin
     level = list(level)
     past = history[history["year"] <= origin]
-    wm = m2.fit_projection_model(past)
+    wm = m2.fit_projection_model(past, sample_frac=sample_frac)
     stay = past[(past["year"] == origin) & ~past["exit"]].copy()
     stay["age"] += 1
     stay["service"] += 1

@@ -137,8 +137,9 @@ def main(argv=None):
     for k, r in opt.items():
         r["front"].to_csv(out / f"optimiser_front_{k}.csv", index=False)
         r["scored"].to_csv(out / f"optimiser_scored_{k}.csv", index=False)
-    ctx.m1["evaluation"].to_csv(out / "m1_evaluation.csv")
-    ctx.m1["recall_by_type"].to_csv(out / "m1_recall_by_type.csv")
+    if "evaluation" in ctx.m1:  # only with the synthetic answer key (data/hrmis_2026_truth.csv)
+        ctx.m1["evaluation"].to_csv(out / "m1_evaluation.csv")
+        ctx.m1["recall_by_type"].to_csv(out / "m1_recall_by_type.csv")
     flagged = ctx.m1["records"]
     flagged[flagged["flag"]].to_csv(out / "m1_flagged_records.csv", index=False)
     ctx.m2_backtest["table"].to_csv(out / "m2_backtest.csv")
@@ -170,7 +171,7 @@ def main(argv=None):
         pickle.dump({"table": table, "fans": fans, "workforce": wf, "adequacy": ad, "shap": shap_out,
                      "wage_bill_sector": frames["wage_bill_sector"], "base_breakdown": base,
                      "hrmis_sample": ctx.data["hrmis"].head(200),
-                     "m1": ctx.m1["evaluation"], "m1_types": ctx.m1["recall_by_type"],
+                     "m1": ctx.m1.get("evaluation"), "m1_types": ctx.m1.get("recall_by_type"),
                      "m2": ctx.m2_backtest["table"], "km": ctx.km, "m5": ctx.m5_backtest,
                      "m5_choice": ctx.m5_choice, "macro": ctx.data["macro"], "central": ctx.central,
                      "engine": engine_bundle(ctx), "runs": args.runs, "optimiser": opt,

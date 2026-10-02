@@ -39,13 +39,15 @@ class Context:
 
 
 def build_context(data_dir: Path, runs: int = C.MC.runs, regenerate: bool = False, log=print) -> Context:
-    if regenerate or not (data_dir / "hrmis_2026.csv").exists():
+    if regenerate or not (data_dir / "hrmis_2026.csv").exists():  # no inputs at all: make synthetic ones
         log("Generating synthetic inputs")
         synthetic.generate(data_dir)
+    # which records are planted anomalies: only the synthetic generator writes this, real data has none
+    truth_file = data_dir / "hrmis_2026_truth.csv"
     data = {
         "history": pd.read_parquet(data_dir / "staff_history.parquet"),
         "hrmis": pd.read_csv(data_dir / "hrmis_2026.csv"),
-        "truth": pd.read_csv(data_dir / "hrmis_2026_truth.csv"),
+        "truth": pd.read_csv(truth_file) if truth_file.exists() else None,
         "pensioners": pd.read_csv(data_dir / "pensioners_2026.csv"),
         "macro": pd.read_csv(data_dir / "macro_history.csv"),
     }
